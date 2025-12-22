@@ -16,5 +16,6 @@ build/
 testing/
 node_modules/
 aegis-jetbrains/build/
+aegis-jetbrains/bin/
 aegis-jetbrains/.gradle/
 aegis-jetbrains/.intellijPlatform
