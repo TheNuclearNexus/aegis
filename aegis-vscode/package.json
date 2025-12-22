@@ -1,5 +1,5 @@
 {
-    "name": "aegis-language-server",
+    "name": "mecha-language-server",
     "publisher": "thenuclearnexus",
     "displayName": "Aegis",
     "description": "MCFunction/Bolt language support for VSCode",
