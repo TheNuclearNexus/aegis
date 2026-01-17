@@ -23,20 +23,19 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - uses: actions/setup-python@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.10"
-
-      - uses: Gr1N/setup-poetry@v8
+          enable-cache: true
 
       - name: Clone Forks of beet and bolt
         run: cd ../ && git clone https://github.com/TheNuclearNexus/bolt  && git clone https://github.com/TheNuclearNexus/mecha && git clone https://github.com/TheNuclearNexus/beet
 
       - name: Install aegis-core
-        run: cd aegis-core && poetry install
+        run: cd aegis-core && uv sync --all-groups
 
       - name: Install aegis-server
-        run: cd aegis-server && poetry install && poetry run python -m aegis_server --help
+        run: cd aegis-server && uv sync --all-groups && uv run python -m aegis_server --help
 
       - name: Build aegis-server zipapp
         run: chmod +x ./build_zipapp.sh && ./build_zipapp.sh
