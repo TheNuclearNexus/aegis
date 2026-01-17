@@ -1,25 +1,35 @@
-[tool.poetry]
+[project]
 name = "aegis_core"
 version = "0.0.0"
 description = "A library to manipulate Mecha for language server usage"
-authors = ["TheNuclearNexus <39636175+TheNuclearNexus@users.noreply.github.com>"]
-license = "MIT"
+authors = [{ name = "TheNuclearNexus", email = "39636175+TheNuclearNexus@users.noreply.github.com" }]
+requires-python = ">=3.10,<4"
 readme = "README.md"
+license = "MIT"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "mecha>=0.101.0,<0.102",
+    "bolt>=0.49.1,<0.50",
+    "lsprotocol>=2023.0.1,<2024",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-mecha = "^0.101.0"
-bolt = "^0.49.1"
-lsprotocol = "^2023.0.1"
+[dependency-groups]
+dev = [
+    "isort>=6.0.0,<7",
+    "black>=25.1.0,<26",
+    "pytest>=8.1.1,<9",
+]
 
-[tool.poetry.group.dev.dependencies]
-isort = "^6.0.0"
-black = "^25.1.0"
-pytest = "^8.1.1"
+[build-system]
+requires = ["uv_build>=0.8.22,<0.9.0"]
+build-backend = "uv_build"
 
 [tool.isort]
 profile = "black"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
