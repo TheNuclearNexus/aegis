@@ -41,7 +41,7 @@ from .shadows.context import LanguageServerContext
 from .shadows.project_builder import ProjectBuilderShadow
 
 logging.basicConfig(
-    filename="mecha.log",
+    filename="aegis.log",
     filemode="w",
     level=logging.DEBUG,
     format="%(levelname)s:%(filename)s:%(lineno)d:\t%(message)s",
