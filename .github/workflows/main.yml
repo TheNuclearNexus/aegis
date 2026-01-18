@@ -29,7 +29,7 @@ jobs:
           enable-cache: true
 
       - name: Clone Forks of beet and bolt
-        run: cd ../ && git clone https://github.com/TheNuclearNexus/bolt  && git clone https://github.com/TheNuclearNexus/mecha && git clone https://github.com/TheNuclearNexus/beet
+        run: cd ../ && git clone https://github.com/TheNuclearNexus/beet
 
       - name: Install aegis-core
         run: cd aegis-core && uv sync --all-groups

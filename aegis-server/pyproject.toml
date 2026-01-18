@@ -3,15 +3,11 @@ name = "aegis_server"
 version = "0.0.0"
 description = "A language server implementation leveraging the aegis library"
 authors = [{ name = "TheNuclearNexus", email = "39636175+TheNuclearNexus@users.noreply.github.com" }]
-requires-python = ">=3.10,<4"
+requires-python = ">=3.14"
 readme = "README.md"
 license = "MIT"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
@@ -26,13 +22,14 @@ dev = [
     "isort>=6.0.0,<7",
     "black>=25.1.0,<26",
     "pytest>=8.1.1,<9",
+    "numpy==2.4.1", # Needed only to help version resolution w/ nbtlib
 ]
 
 [tool.uv]
 
 [tool.uv.sources]
-mecha = { path = "../../mecha", editable = true }
-bolt = { path = "../../bolt", editable = true }
+mecha = { path = "../../beet/packages/mecha", editable = true }
+bolt = { path = "../../beet/packages/bolt", editable = true }
 aegis_core = { path = "../aegis-core", editable = true }
 
 [build-system]
