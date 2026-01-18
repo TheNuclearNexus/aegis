@@ -38,7 +38,7 @@ jobs:
         run: cd aegis-server && uv sync --all-groups && uv run python -m aegis_server --help
 
       - name: Build aegis-server zipapp
-        run: chmod +x ./build_zipapp.sh && ./build_zipapp.sh
+        run: python ./.github/workflows/build.py
 
       - name: Use Node.js
         uses: actions/setup-node@v4
