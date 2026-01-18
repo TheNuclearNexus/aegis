@@ -11,7 +11,7 @@ from functools import partial
 from pathlib import Path, PurePath
 from typing import Any, TypeVar
 
-from beet import Context, DataPack, Function, NamespaceFile, PackLoadUrl, TextFileBase
+from beet import Context, DataPack, Function, NamespaceFile, PackageablePath, TextFileBase
 from beet.core.utils import extra_field, required_field
 from bolt import Module, Runtime
 from mecha import (
@@ -143,14 +143,14 @@ def try_to_mount_file(ctx: LanguageServerContext, file_path: str):
     prefix = None
     for entry in load_options.entries():
         # File can't be relative to a url
-        if isinstance(entry, PackLoadUrl):
+        if isinstance(entry, PackageablePath):
             continue
 
         if isinstance(entry, dict):
             for key, paths in entry.items():
                 for path in paths.entries():
                     # File can't be relative to a url
-                    if isinstance(path, PackLoadUrl):
+                    if isinstance(path, PackageablePath):
                         continue
 
                     if PurePath(file_path).is_relative_to(path):

@@ -8,7 +8,7 @@ from typing import ClassVar
 
 from beet import Context, File, Function, NamespaceFile
 from beet.core.utils import extra_field, required_field
-from bolt import Module
+
 from mecha import Mecha
 from tokenstream import SourceLocation
 
@@ -179,7 +179,7 @@ class AegisProjectIndex:
 
                     mecha = self._ctx.inject(Mecha)
                     if file in mecha.database:
-                        del mecha.database[file]
+                        del mecha.database[file] #type: ignore
                         self._remove_from_queue(file, mecha)
 
     def _remove_from_queue(self, file, mecha: Mecha):
