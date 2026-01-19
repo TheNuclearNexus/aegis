@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import multiprocessing
 import os
@@ -37,6 +38,7 @@ from mecha.contrib.nested_location import (
     NestedLocationTransformer,
 )
 from pygls.workspace import TextDocument
+import lsprotocol.types as lsp
 from tokenstream import InvalidSyntax, SourceLocation, TokenStream
 
 from ..indexing import AegisProjectIndex, Indexer
@@ -46,6 +48,8 @@ from ..shadows.compile_document import (
     CompiledDocument,
 )
 from ..shadows.context import LanguageServerContext
+
+TIMEOUT_DURATION = 10
 
 SUPPORTED_EXTENSIONS = [Function.extension, Module.extension]
 T = TypeVar("T", bound=AstNode)
@@ -114,19 +118,20 @@ async def validate_function(
             return []
 
         try:
-            async with asyncio.timeout(10):
-                compiled_doc = await parse_function(
-                    ctx,
-                    location,
-                    text_doc.path,
-                    type(file)(text_doc.source, text_doc.path),
-                )
+            compiled_doc = await parse_function(
+                ctx,
+                location,
+                text_doc.path,
+                type(file)(text_doc.source, text_doc.path),
+            )
 
             COMPILATION_RESULTS[location] = compiled_doc
             res = compiled_doc.diagnostics
 
         except TimeoutError as ex:
-            logging.debug(f"Compilation took longer than 10 seconds, aborting\n{ex}")
+            message = f"Compilation took longer than {TIMEOUT_DURATION} seconds, aborting"
+            logging.debug(f"{message}\n{ex}")
+            ctx.ls.show_message(message, lsp.MessageType.Error)
             res = []
 
     return res
@@ -218,7 +223,18 @@ async def parse_function(
 ) -> CompiledDocument:
 
     start = time.time()
-    ast, errors = await compile(ctx, resource_location, source_path, file_instance)
+
+    loop = asyncio.get_running_loop()
+
+    with ThreadPoolExecutor() as pool:
+        try:
+            ast, errors = await asyncio.wait_for(
+                loop.run_in_executor(pool, compile, ctx, resource_location, source_path, file_instance),
+                timeout=TIMEOUT_DURATION
+            )
+        except TimeoutError as exec:
+            raise exec
+
     logging.debug(f"Compilation for {source_path} took {time.time() - start}s")
 
     # # Parse the stream
@@ -227,6 +243,7 @@ async def parse_function(
 
     compilation_unit = mecha.database[file_instance]
     compiled_module = runtime.modules.registry.get(file_instance)
+    logging.debug(compiled_module.lexical_scope if compiled_module else "")
 
     return CompiledDocument(
         resource_location=resource_location,
@@ -247,7 +264,7 @@ def use_steps(mecha: Mecha, steps):
     mecha.steps = initial_steps
 
 
-async def compile(
+def compile(
     ctx: LanguageServerContext,
     resource_location: str,
     source_path: str,
@@ -281,6 +298,7 @@ async def compile(
         database.enqueue(source_file)
 
         for step, file_instance in database.process_queue():
+            logging.info(f"{database.queue}")
             compilation_unit = mecha.database[file_instance]
             logging.debug(f"--- Step {step} for {compilation_unit.filename} ---")
             start = time.time()
@@ -315,7 +333,8 @@ async def compile(
                     tb = "\n".join(traceback.format_tb(exec.__traceback__))
                     logging.error(f"{tb}")
                 except Exception as exec:
-                    logging.error(f"{type(exec)}: {exec}")
+                    tb = "\n".join(traceback.format_tb(exec.__traceback__))
+                    logging.error(f"{type(exec)}: {exec}\n{tb}")
 
             elif step < len(mecha.steps):
                 if not compilation_unit.ast:

@@ -4,6 +4,7 @@ from bolt import AstIdentifier
 from lsprotocol import types as lsp
 from mecha import AstResourceLocation
 
+from aegis_core.ast.features.provider import CompilationInformation
 from aegis_core.ast.features import AegisFeatureProviders, DefinitionParams
 
 from .. import AegisServer
@@ -26,7 +27,10 @@ async def get_definition(ls: AegisServer, params: lsp.DefinitionParams):
     provider = compiled_doc.ctx.inject(AegisFeatureProviders).retrieve(node)
 
     return provider.definition(
-        DefinitionParams(compiled_doc.ctx, node, compiled_doc.resource_location)
+        DefinitionParams(compiled_doc.ctx, node, compiled_doc.resource_location, params.text_document.uri, CompilationInformation(
+            compiled_doc.compiled_unit,
+            compiled_doc.compiled_module
+        ))
     )
 
     if compiled_doc.compiled_module is None:

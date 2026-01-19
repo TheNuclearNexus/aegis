@@ -1,11 +1,20 @@
 from functools import reduce
 import inspect
 from typing import Any, get_origin
-from aegis_core.ast.features.provider import BaseFeatureProvider
-from aegis_core.ast.helpers import offset_location
+from aegis_core.ast.features.provider import BaseFeatureProvider, DefinitionParams
+from aegis_core.ast.helpers import node_location_to_range, offset_location
 from aegis_core.ast.metadata import VariableMetadata, attach_metadata, retrieve_metadata
-from aegis_core.reflection import UNKNOWN_TYPE, FunctionInfo, TypeInfo, get_annotation_description, get_function_description, get_type_info
+from aegis_core.reflection import (
+    UNKNOWN_TYPE,
+    FunctionInfo,
+    TypeInfo,
+    get_annotation_description,
+    get_function_description,
+    get_type_info,
+    search_scope_for_binding,
+)
 from aegis_core.semantics import TokenModifier, TokenType
+from aegis_core.reflection.type_representation import CallableRepresentation, ClassRepresentation
 import lsprotocol.types as lsp
 from bolt import (
     AstAttribute,
@@ -13,10 +22,11 @@ from bolt import (
     AstImportedItem,
     AstTargetAttribute,
     AstTargetIdentifier,
+    Module,
+    Runtime,
     Variable,
 )
-from mecha import AstNode
-
+from mecha import AstNode, Mecha
 
 
 __all__ = ["VariableFeatureProvider"]
@@ -143,17 +153,16 @@ def generic_variable_token(
 ) -> list[tuple[AstNode, TokenType, list[TokenModifier]]]:
     nodes: list[tuple[AstNode, TokenType, list[TokenModifier]]] = []
     annotation = get_type_annotation(identifier)
-
+    
     if annotation is not None and (
-        inspect.isfunction(annotation)
-        or inspect.isbuiltin(annotation)
-        or isinstance(annotation, FunctionInfo)
-    ):
-        nodes.append((identifier, "function", []))
-    elif annotation is not None and (
-        get_origin(annotation) is type or isinstance(annotation, TypeInfo)
+        isinstance(annotation, ClassRepresentation)
     ):
         nodes.append((identifier, "class", []))
+
+    elif annotation is not None and (
+        isinstance(annotation, CallableRepresentation)
+    ):
+        nodes.append((identifier, "function", []))
     else:
         kind = "variable"
         modifiers: list[TokenModifier] = []
@@ -249,3 +258,38 @@ class VariableFeatureProvider(
             case AstImportedItem():
                 return generic_variable_token(params.node.name, params.node)
         return None
+
+    @classmethod
+    def definition(
+        cls,
+        params: DefinitionParams[
+            AstIdentifier
+            | AstAttribute
+            | AstTargetAttribute
+            | AstTargetIdentifier
+            | AstImportedItem
+        ],
+    ) -> list[lsp.Location | lsp.LocationLink] | lsp.Location | lsp.LocationLink | None:
+        match params.node:
+            case AstIdentifier() as ident:
+                var_name = ident.value
+
+                module = params.compilation.module
+
+                if module is None:
+                    return
+                
+                scope = module.lexical_scope
+
+                result = search_scope_for_binding(var_name, ident, scope)
+
+                if not result:
+                    return
+
+                binding, scope = result
+
+                range = node_location_to_range(binding.origin)
+
+                return lsp.Location(params.text_document_uri, range)
+
+

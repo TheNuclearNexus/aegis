@@ -7,7 +7,7 @@ from mecha import AstResourceLocation
 from aegis_core.ast.features import AegisFeatureProviders, ReferencesParams
 
 from .. import AegisServer
-from ..indexing import AegisProjectIndex, search_scope_for_binding
+from ..indexing import search_scope_for_binding
 from .helpers import (
     fetch_compilation_data,
     get_node_at_position,
