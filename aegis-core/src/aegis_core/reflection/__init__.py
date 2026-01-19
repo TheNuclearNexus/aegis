@@ -1,11 +1,17 @@
+import builtins
 import inspect
 import types
 import typing
+import aegis_core.reflection.type_representation as type_representation
 from copy import copy
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, get_args, get_origin
 
-UNKNOWN_TYPE = object()
+from bolt import AstIdentifier, Binding, LexicalScope
+from mecha import AstNode
+
+from .type_representation import TypeRepresentation, UNKNOWN_TYPE
+
 TYPE_TO_INFO: dict[type, "TypeInfo"] = {}
 
 
@@ -99,7 +105,6 @@ class TypeInfo:
 
 
 def get_type_info(_type: type) -> TypeInfo:
-
     if _type in TYPE_TO_INFO:
         return TYPE_TO_INFO[type]
 
@@ -240,7 +245,9 @@ def get_function_description(name: str, function: Any):
     return f"```py\n{format_function_hints(name, function_info)}\n```{doc_string}"
 
 
-def get_annotation_description(name: str, type_annotation: Any):
+def get_annotation_description(name: str, type_annotation: TypeRepresentation):
+    return type_annotation.description(name)
+
     if get_origin(type_annotation) is type:
         args = get_args(type_annotation)
         description = get_class_description(name, args[0])
@@ -256,3 +263,53 @@ def get_annotation_description(name: str, type_annotation: Any):
         description = get_variable_description(name, type_annotation)
 
     return description
+
+def are_equal(a: AstNode, b: AstNode) -> bool:
+    return type(a) == type(b) and a.location == b.location
+
+def was_referenced(references: list[AstNode], identifier: AstNode):
+    for reference in references:
+        if are_equal(identifier, reference):
+            return True
+
+    return False
+
+
+def is_builtin(identifier: AstIdentifier):
+    if identifier.value.startswith("_"):
+        return None
+
+    return (
+        getattr(builtins, identifier.value)
+        if hasattr(builtins, identifier.value)
+        else None
+    )
+
+
+def annotate_types(annotation):
+    if inspect.isclass(annotation):
+        return type[annotation]
+    elif inspect.isfunction(annotation) or inspect.isbuiltin(annotation):
+        return annotation
+    else:
+        return type(annotation)
+
+def search_scope_for_binding(
+    var_name: str, node: AstNode, scope: LexicalScope
+) -> tuple[Binding, LexicalScope] | None:
+    variables = scope.variables
+    if var_name in variables:
+        var_data = variables[var_name]
+
+        for binding in var_data.bindings:
+            if was_referenced(binding.references, node) or are_equal(
+                binding.origin, node
+            ):
+                return (binding, scope)
+
+    for child in scope.children:
+        if binding := search_scope_for_binding(var_name, node, child):
+            return binding
+
+    return None
+

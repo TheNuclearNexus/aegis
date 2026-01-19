@@ -5,6 +5,7 @@ from beet import NamespaceFile
 from mecha import AstNode
 
 from ..reflection import UNKNOWN_TYPE
+from ..reflection.type_representation import TypeRepresentation
 
 METADATA_KEY = "aegis_metadata"
 
@@ -38,7 +39,7 @@ class VariableMetadata(BaseMetadata):
         The documentation string for the node
     """
 
-    type_annotation: Any = field(default=UNKNOWN_TYPE)
+    type_annotation: TypeRepresentation = field(default_factory=lambda: UNKNOWN_TYPE)
 
     documentation: str | None = field(default=None)
 
