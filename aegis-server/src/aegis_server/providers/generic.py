@@ -77,7 +77,7 @@ class ValueProvider(BaseFeatureProvider[AstValue]):
     def semantics(cls, params):
         value = params.node
 
-        metadata = retrieve_metadata(value, VariableMetadata)
+        metadata = retrieve_metadata(params.resource_location, value, VariableMetadata)
 
         if not metadata or not metadata.type_annotation:
             return None

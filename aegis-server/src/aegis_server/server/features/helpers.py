@@ -11,8 +11,8 @@ from .. import AegisServer
 from .validate import get_compilation_data
 
 
-def get_representation_file(node: AstResourceLocation):
-    metadata = retrieve_metadata(node, ResourceLocationMetadata)
+def get_representation_file(resource_location: str, node: AstResourceLocation):
+    metadata = retrieve_metadata(resource_location, node, ResourceLocationMetadata)
 
     if not metadata:
         return None

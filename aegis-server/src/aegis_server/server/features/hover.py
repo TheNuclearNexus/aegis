@@ -1,7 +1,12 @@
 from lsprotocol import types as lsp
 
 from aegis_core.ast.features import AegisFeatureProviders, HoverParams
-from aegis_core.ast.helpers import node_location_to_range
+from aegis_core.ast.helpers import (
+    BaseMetadata,
+    _hash_node,
+    node_location_to_range,
+    retrieve_metadata,
+)
 
 from .. import AegisServer
 from .helpers import (
@@ -27,7 +32,7 @@ async def get_hover(ls: AegisServer, params: lsp.HoverParams):
         return lsp.Hover(
             lsp.MarkupContent(
                 lsp.MarkupKind.Markdown,
-                f"Repr: `{node.__repr__()}`\n\nDict: ```{node.__dict__.__repr__()}```",
+                f"Repr: `{node.__repr__()}`\n\nHash: {_hash_node(node)}\nDict: ```{retrieve_metadata(compiled_doc.resource_location, node, BaseMetadata)}```",
             ),
             text_range,
         )

@@ -20,20 +20,24 @@ from aegis_core.ast.metadata import (
 T = TypeVar("T", bound=AstNode)
 
 
-def set_dict(a: T, b: AstNode) -> T:
-    if metadata := retrieve_metadata(b):
-        attach_metadata(a, metadata)
+# def set_dict(a: T, b: AstNode) -> T:
+#     if metadata := retrieve_metadata(b):
+#         attach_metadata(a, metadata)
 
-    return a
+#     return a
 
 
 def parse_relative_path(
     self: RelativeResourceLocationParser, stream: TokenStream
 ) -> AstResourceLocation:
     node: AstResourceLocation = self.parser(stream)
+
+    resource_location = self.database[self.database.current].resource_location
+    
+
     metadata = (
-        retrieve_metadata(node, ResourceLocationMetadata) or ResourceLocationMetadata()
-    )
+        retrieve_metadata(resource_location, node, ResourceLocationMetadata) or ResourceLocationMetadata()
+    ) if resource_location else ResourceLocationMetadata()
 
 
     if node.namespace is None and node.path.startswith(("./", "../")):
@@ -51,7 +55,8 @@ def parse_relative_path(
     else:
         metadata.unresolved_path = node.get_canonical_value()
 
-    attach_metadata(node, metadata)
+    if resource_location:
+        attach_metadata(resource_location, node, metadata)
 
     return node
 
@@ -64,7 +69,8 @@ def wrap_nested_location(
     node: AstNestedLocation,
 ):
     new_node = original_rule(self, node)
-    return set_dict(new_node, node)
+    # return set_dict(new_node, node)
+    return new_node
 
 
 def apply_patches():

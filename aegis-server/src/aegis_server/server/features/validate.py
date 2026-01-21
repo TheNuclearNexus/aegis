@@ -271,6 +271,7 @@ def compile(
     source_file: Function | Module,
 ) -> tuple[AstRoot, list[InvalidSyntax]]:
     mecha = ctx.inject(Mecha)
+    runtime = ctx.inject(Runtime)
     diagnostics = []
 
     try:
@@ -287,7 +288,7 @@ def compile(
         file_instance=source_file,
     )
 
-    with use_steps(mecha, [indexer, mecha.lint, mecha.transform]):
+    with use_steps(mecha, [runtime.evaluate, indexer,  mecha.lint, mecha.transform]):
 
         # Configure the database to compile the file
         compiled_unit = CompilationUnit(

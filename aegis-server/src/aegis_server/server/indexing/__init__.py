@@ -1,6 +1,6 @@
-import builtins
-import inspect
+from contextlib import contextmanager
 import logging
+from pathlib import Path
 import traceback
 from copy import copy, deepcopy
 from dataclasses import dataclass
@@ -10,27 +10,28 @@ from typing import (
     Any,
     Callable,
     Optional,
-    Protocol,
+    Sequence,
     TypeVar,
-    Union,
     cast,
-    get_args,
-    get_origin,
 )
 
+from aegis_core.ast.helpers import _hash_node
 from beet import (
     Advancement,
     Function,
     LootTable,
     NamespaceFile,
     Predicate,
+    TextFileBase,
 )
 from beet.core.utils import extra_field, required_field
 from bolt import (
     AstAssignment,
     AstAttribute,
     AstCall,
+    AstClassBases,
     AstClassName,
+    AstClassRoot,
     AstDict,
     AstDocstring,
     AstExpression,
@@ -86,6 +87,7 @@ from aegis_core.ast.metadata import (
     ResourceLocationMetadata,
     VariableMetadata,
     attach_metadata,
+    clear_metadata,
     retrieve_metadata,
 )
 from aegis_core.indexing.project_index import AegisProjectIndex, valid_resource_location
@@ -102,6 +104,8 @@ from aegis_core.reflection import (
 from aegis_core.reflection.type_representation import (
     ClassRepresentation,
     BuiltinRepresentation,
+    ModuleRepresentation,
+    ReferencedTypeRepresentation,
     TypeRepresentation,
     UnionRepresentation,
     InstanceRepresentation,
@@ -177,15 +181,15 @@ Node = TypeVar("Node", bound=AstNode)
 #     return UNKNOWN_TYPE
 
 
-def add_representation(arg_node: AstNode, type: Any):
-    metadata = retrieve_metadata(arg_node, ResourceLocationMetadata)
+def add_representation(resource_location, arg_node: AstNode, type: Any):
+    metadata = retrieve_metadata(resource_location, arg_node, ResourceLocationMetadata)
 
     if metadata is None:
         metadata = ResourceLocationMetadata()
 
     metadata.represents = type
 
-    attach_metadata(arg_node, metadata)
+    attach_metadata(resource_location, arg_node, metadata)
 
 
 @dataclass
@@ -269,8 +273,10 @@ type IdentifierLike = AstIdentifier | AstFunctionSignatureArgument
 
 @dataclass
 class BindingStep(Reducer):
+    ctx: LanguageServerContext = required_field()
     index: AegisProjectIndex = required_field()
     source_path: str = required_field()
+    resource_location: str = required_field()
     runtime: Runtime = required_field()
     mecha: Mecha = required_field()
 
@@ -280,11 +286,20 @@ class BindingStep(Reducer):
 
     defined_files = []
 
+    def type_analysis(self, node: AstNode):
+        if self.has_type_annotation(node):
+            return False
+
+        self.set_type_annotation(
+            node, ReferencedTypeRepresentation.from_node(self.resource_location, node)
+        )
+        return True
+
     def has_type_annotation(self, node: AstNode) -> bool:
         if node is None:
             return True
 
-        if retrieve_metadata(node, VariableMetadata):
+        if retrieve_metadata(self.resource_location, node, VariableMetadata):
             return True
 
         return False
@@ -294,40 +309,67 @@ class BindingStep(Reducer):
             return UNKNOWN_TYPE
 
         if self.has_type_annotation(node):
-            metadata = retrieve_metadata(node, VariableMetadata)
+            metadata = retrieve_metadata(self.resource_location, node, VariableMetadata)
 
             if metadata is None:
                 return UNKNOWN_TYPE
 
-            return metadata.type_annotation
+            annotation = metadata.type_annotation
+            tree = [annotation]
+            while isinstance(annotation, ReferencedTypeRepresentation):
+                metadata = retrieve_metadata(
+                    annotation.resource_location, annotation.hash, VariableMetadata
+                )
+                assert metadata
+                annotation = metadata.type_annotation
+                if annotation in tree:
+                    annotation = UNKNOWN_TYPE
+                    break
+
+                tree.append(annotation)
+
+            return annotation
 
         # Run the binding step on the node to get it's type annotation
         self.invoke(node)
-        metadata = retrieve_metadata(node, VariableMetadata)
+        metadata = retrieve_metadata(self.resource_location, node, VariableMetadata)
         return metadata.type_annotation if metadata else UNKNOWN_TYPE
 
+    def get_type_annotation_ref(self, node: AstNode) -> TypeRepresentation:
+        annotation = self.get_type_annotation(node)
+
+        if annotation is UNKNOWN_TYPE:
+            return UNKNOWN_TYPE
+
+        if isinstance(annotation, ReferencedTypeRepresentation):
+            return annotation
+
+        return ReferencedTypeRepresentation.from_node(self.resource_location, node)
+
     def set_type_annotation(self, node: AstNode, value: TypeRepresentation):
-        metadata = retrieve_metadata(node, VariableMetadata) or VariableMetadata()
+        metadata = (
+            retrieve_metadata(self.resource_location, node, VariableMetadata)
+            or VariableMetadata()
+        )
 
         metadata.type_annotation = value
 
-        attach_metadata(node, metadata)
+        attach_metadata(self.resource_location, node, metadata)
 
     @rule(AstValue)
     def value(self, node: AstValue):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
+            annotation = TypeRepresentation.from_python(type(node.value))
 
-        annotation = TypeRepresentation.from_python(type(node.value))
+            self.set_type_annotation(node, InstanceRepresentation(annotation))
 
-        self.set_type_annotation(node, InstanceRepresentation(annotation))
         return node
 
     @rule(AstCommand, identifier="def:function:body")
     def function_body(self, node: AstCommand):
         if not self.has_type_annotation(node.arguments[0]):
             return node
-        
+
         signature = cast(AstFunctionSignature, node.arguments[0])
         body = cast(AstRoot, node.arguments[1])
 
@@ -342,310 +384,411 @@ class BindingStep(Reducer):
         annotation = self.get_type_annotation(signature)
 
         if isinstance(annotation, FunctionRepresentation):
+            logging.debug(f"\n\n{id(annotation)}\n{_hash_node(signature)}\n\n")
             annotation.doc_string = doc_string
 
         return node
 
     @rule(AstFunctionSignature)
     def function_sig(self, node: AstFunctionSignature):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
+            arguments = []
+            var_arguments = []
+            var_kw_arguments = []
 
-        arguments = []
-        var_arguments = []
-        var_kw_arguments = []
+            for arg in node.arguments:
+                match arg:
+                    case AstFunctionSignatureArgument():
+                        annotation = self.get_type_annotation(arg)
+                        if isinstance(annotation, InstanceRepresentation):
+                            annotation = annotation.parent
 
-        for arg in node.arguments:
-            match arg:
-                case AstFunctionSignatureArgument():
-                    annotation = self.get_type_annotation(arg)
-                    if isinstance(annotation, InstanceRepresentation):
-                        annotation = annotation.parent
+                        arguments.append(
+                            ParameterRepresentation(arg.name, annotation, arg.default)
+                        )
+                    case AstFunctionSignatureVariadicArgument():
+                        annotation = self.get_type_annotation(arg)
+                        if isinstance(annotation, InstanceRepresentation):
+                            annotation = annotation.parent
 
-                    arguments.append(
-                        ParameterRepresentation(arg.name, annotation, arg.default)
-                    )
-                case AstFunctionSignatureVariadicArgument():
-                    annotation = self.get_type_annotation(arg)
-                    if isinstance(annotation, InstanceRepresentation):
-                        annotation = annotation.parent
+                        var_arguments.append(
+                            ParameterRepresentation(arg.name, annotation, None)
+                        )
+                    case AstFunctionSignatureVariadicKeywordArgument():
+                        annotation = self.get_type_annotation(arg)
+                        if isinstance(annotation, InstanceRepresentation):
+                            annotation = annotation.parent
 
-                    var_arguments.append(
-                        ParameterRepresentation(arg.name, annotation, None)
-                    )
-                case AstFunctionSignatureVariadicKeywordArgument():
-                    annotation = self.get_type_annotation(arg)
-                    if isinstance(annotation, InstanceRepresentation):
-                        annotation = annotation.parent
+                        var_kw_arguments.append(
+                            ParameterRepresentation(arg.name, annotation, None)
+                        )
 
-                    var_kw_arguments.append(
-                        ParameterRepresentation(arg.name, annotation, None)
-                    )
+            return_type = (
+                self.get_type_annotation(node.return_type_annotation)
+                if node.return_type_annotation
+                else UNKNOWN_TYPE
+            )
 
-        return_type = (
-            self.get_type_annotation(node.return_type_annotation)
-            if node.return_type_annotation
-            else UNKNOWN_TYPE
-        )
-
-        self.set_type_annotation(
-            node,
-            FunctionRepresentation(
-                node.name,
-                doc_string=None,
-                arguments=arguments,
-                var_arguments=var_arguments,
-                var_kw_arguments=var_kw_arguments,
-                return_type=return_type,
-            ),
-        )
+            self.set_type_annotation(
+                node,
+                FunctionRepresentation(
+                    node.name,
+                    doc_string=None,
+                    arguments=arguments,
+                    var_arguments=var_arguments,
+                    var_kw_arguments=var_kw_arguments,
+                    return_type=return_type,
+                ),
+            )
 
         return node
 
     @rule(AstFunctionSignatureArgument)
     def function_sig_arg(self, node: AstFunctionSignatureArgument):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
+            if node.type_annotation and (
+                annotation := self.get_type_annotation(node.type_annotation)
+            ):
+                self.set_type_annotation(node, InstanceRepresentation(annotation))
+                return node
 
-        if node.type_annotation and (
-            annotation := self.get_type_annotation(node.type_annotation)
-        ):
-            self.set_type_annotation(node, InstanceRepresentation(annotation))
-            return node
+            if node.default and (annotation := self.get_type_annotation(node.default)):
+                self.set_type_annotation(node, annotation)
+                return node
 
-        if node.default and (annotation := self.get_type_annotation(node.default)):
-            self.set_type_annotation(node, annotation)
-            return node
+            self.set_type_annotation(node, UNKNOWN_TYPE)
 
-        self.set_type_annotation(node, UNKNOWN_TYPE)
         return node
 
     @rule(AstFunctionSignatureVariadicArgument)
     def function_sig_var_arg(self, node: AstFunctionSignatureVariadicArgument):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
+            if node.type_annotation and (
+                annotation := self.get_type_annotation(node.type_annotation)
+            ):
+                self.set_type_annotation(node, InstanceRepresentation(annotation))
+                return node
 
-        if node.type_annotation and (
-            annotation := self.get_type_annotation(node.type_annotation)
-        ):
-            self.set_type_annotation(node, InstanceRepresentation(annotation))
-            return node
+            self.set_type_annotation(node, UNKNOWN_TYPE)
 
-        self.set_type_annotation(node, UNKNOWN_TYPE)
         return node
 
     @rule(AstFunctionSignatureVariadicKeywordArgument)
     def function_sig_kw_arg(self, node: AstFunctionSignatureVariadicKeywordArgument):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
+            if node.type_annotation and (
+                annotation := self.get_type_annotation(node.type_annotation)
+            ):
+                self.set_type_annotation(node, InstanceRepresentation(annotation))
+                return node
 
-        if node.type_annotation and (
-            annotation := self.get_type_annotation(node.type_annotation)
-        ):
-            self.set_type_annotation(node, InstanceRepresentation(annotation))
-            return node
+            self.set_type_annotation(node, UNKNOWN_TYPE)
 
-        self.set_type_annotation(node, UNKNOWN_TYPE)
         return node
 
     @rule(AstIdentifier)
     def identifier(self, node: AstIdentifier):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
+            if self.module:
+                if binding := search_scope_for_binding(
+                    node.value, node, self.module.lexical_scope
+                ):
+                    annotation = self.get_type_annotation_ref(binding[0].origin)
+                    self.set_type_annotation(node, annotation)
+                    return node
 
-        if self.module:
-            if binding := search_scope_for_binding(
-                node.value, node, self.module.lexical_scope
-            ):
-                annotation = self.get_type_annotation(binding[0].origin)
-                self.set_type_annotation(node, annotation)
-                return node
-
-        if builtin := is_builtin(node):
-            self.set_type_annotation(node, TypeRepresentation.from_python(builtin))
-        else:
-            self.set_type_annotation(node, UNKNOWN_TYPE)
+            if builtin := is_builtin(node):
+                self.set_type_annotation(node, TypeRepresentation.from_python(builtin))
+            else:
+                self.set_type_annotation(node, UNKNOWN_TYPE)
 
         return node
 
     @rule(AstCall)
     def call(self, node: AstCall):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
 
-        annotation = self.get_type_annotation(node.value)
+            annotation = self.get_type_annotation(node.value)
 
-        match annotation:
-            case ClassRepresentation() as cls:
-                self.set_type_annotation(node, InstanceRepresentation(cls))
-            case FunctionRepresentation() as func:
-                self.set_type_annotation(node, func.return_type)
+            if isinstance(annotation, InstanceRepresentation):
+                annotation = annotation.parent
+
+            match annotation:
+                case ClassRepresentation() as cls:
+                    self.set_type_annotation(node, InstanceRepresentation(cls))
+                case FunctionRepresentation() as func:
+                    self.set_type_annotation(node, func.return_type)
+
+        return node
 
     @rule(AstLookup)
     def lookup(self, node: AstLookup):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
+            base_type = self.get_type_annotation(node.value)
 
-        base_type = self.get_type_annotation(node.value)
+            if not base_type:
+                self.set_type_annotation(node, UNKNOWN_TYPE)
+                return node
 
-        if not base_type:
-            self.set_type_annotation(node, UNKNOWN_TYPE)
-            return node
+            if isinstance(base_type, ClassRepresentation):
+                arguments = [self.get_type_annotation(n) for n in node.arguments]
 
-        if isinstance(base_type, ClassRepresentation):
-            arguments = [self.get_type_annotation(n) for n in node.arguments]
-
-            base_type = ClassRepresentation(
-                name=base_type.name,
-                fields=base_type.fields,
-                methods=base_type.methods,
-                doc_string=base_type.doc_string,
-                generics=arguments,
-            )
-            self.set_type_annotation(node, base_type)
-        else:
-            self.set_type_annotation(node, base_type)
+                base_type = ClassRepresentation(
+                    name=base_type.name,
+                    fields=base_type.fields,
+                    methods=base_type.methods,
+                    doc_string=base_type.doc_string,
+                    generics=arguments,
+                )
+                self.set_type_annotation(node, base_type)
+            else:
+                self.set_type_annotation(node, base_type)
 
         return arguments
 
     @rule(AstTypeAnnotation)
     def annotation(self, node: AstTypeAnnotation):
-        if self.has_type_annotation(node):
-            return node
+        if self.type_analysis(node):
+            types = []
+            for child in node:
+                types.append(self.get_type_annotation(child))
 
-        types = []
-        for child in node:
-            types.append(self.get_type_annotation(child))
+            if len(types) == 1:
+                self.set_type_annotation(node, types[0])
+            elif len(types) > 1:
+                self.set_type_annotation(node, UnionRepresentation(types))
+            else:
+                self.set_type_annotation(node, UNKNOWN_TYPE)
 
-        if len(types) == 1:
-            self.set_type_annotation(node, types[0])
-        elif len(types) > 1:
-            self.set_type_annotation(node, UnionRepresentation(types))
-        else:
-            self.set_type_annotation(node, UNKNOWN_TYPE)
+        return node
+
+    @rule(AstTypeDeclaration)
+    def type_declaration(self, node: AstTypeDeclaration):
+        if self.type_analysis(node):
+            annotation = self.get_type_annotation(node.type_annotation)
+
+            self.set_type_annotation(node, InstanceRepresentation(annotation))
 
         return node
 
     @rule(AstAssignment)
     def assignment(self, node: AstAssignment):
-        if self.has_type_annotation(node.target):
-            return node
+        if self.type_analysis(node.target):
+            if node.type_annotation:
+                annotation = self.get_type_annotation(node.type_annotation)
+                if annotation:
+                    self.set_type_annotation(
+                        node.target, InstanceRepresentation(annotation)
+                    )
+                    return node
 
-        if node.type_annotation:
-            annotation = self.get_type_annotation(node.type_annotation)
-            if annotation:
-                self.set_type_annotation(
-                    node.target, InstanceRepresentation(annotation)
-                )
-                return node
+            value_type = self.get_type_annotation(node.value)
 
-        value_type = self.get_type_annotation(node.value)
-
-        self.set_type_annotation(node.target, value_type)
+            self.set_type_annotation(node.target, value_type)
 
         return node
 
-    # @rule(AstAssignment)
-    # def assignment(self, node: AstAssignment):
-    #     if node.target is None:
-    #         return node
+    @rule(AstAttribute)
+    def attribute(self, node: AstAttribute):
+        if self.type_analysis(node):
+            base_type = self.get_type_annotation(node.value)
 
-    #     if node.type_annotation:
-    #         type_annotation = get_type_annotation(node.type_annotation)
-    #     else:
-    #         expression = node.value
-    #         type_annotation = get_type_annotation(expression)
+            if isinstance(base_type, InstanceRepresentation):
+                base_type = base_type.parent
 
-    #     if type_annotation is not None:
-    #         set_type_annotation(node.target, type_annotation)
-    #     return node
+            match base_type:
+                case ClassRepresentation():
+                    if field := base_type.get_field(node.name):
+                        self.set_type_annotation(node, InstanceRepresentation(field[1]))
+                        return node
 
-    # @rule(AstTypeDeclaration)
-    # def type_declaration(self, node: AstTypeDeclaration):
-    #     annotation = get_type_annotation(node.type_annotation)
+                    if method := base_type.get_method(node.name):
+                        self.set_type_annotation(node, method[1])
+                        return node
 
-    #     set_type_annotation(node.identifier, annotation)
-    #     return node
+            self.set_type_annotation(node, UNKNOWN_TYPE)
+        return node
 
-    # @rule(AstIdentifier)
-    # def identifier(self, identifier):
-    #     if (
-    #         has_type_annotation(identifier)
-    #         or self.module is None
-    #         or self.runtime is None
-    #     ):
-    #         return identifier
+    @rule(AstCommand, identifier="class:name:body")
+    def class_name_body(self, node: AstCommand):
+        if self.type_analysis(node):
+            return self.handle_class_defs(node)
+        return node
 
-    #     set_type_annotation(
-    #         identifier, get_referenced_type(self.runtime, self.module, identifier)
-    #     )
+    @rule(AstCommand, identifier="class:name:bases:body")
+    def class_name_bases_body(self, node: AstCommand):
+        if self.type_analysis(node):
+            return self.handle_class_defs(node)
+        return node
 
-    #     return identifier
+    def handle_class_defs(self, node: AstCommand):
+        name = cast(AstClassName, node.arguments[0])
 
-    # @rule(AstAttribute)
-    # def attribute(self, attribute: AstAttribute):
-    #     if has_type_annotation(attribute):
-    #         return attribute
+        if node.identifier == "class:name:bases:body":
+            bases: Sequence[AstExpression] = cast(
+                AstClassBases, node.arguments[1]
+            ).inherit
+            body = cast(AstClassRoot, node.arguments[2])
+        else:
+            bases = []
+            body = cast(AstClassRoot, node.arguments[1])
 
-    #     base = get_type_annotation(attribute.value)
+        base_types = []
+        for base in bases:
+            base_types.append(self.get_type_annotation(base))
 
-    #     if base is UNKNOWN_TYPE:
-    #         set_type_annotation(attribute, UNKNOWN_TYPE)
-    #         return attribute
+        doc_string = None
+        fields: list[tuple[str, TypeRepresentation, Any]] = []
+        methods: list[tuple[str, TypeRepresentation]] = []
 
-    #     if not isinstance(base, ClassRepresentation):
-    #         set_type_annotation(attribute, UNKNOWN_TYPE)
-    #         return attribute
+        for command in body.commands:
+            if isinstance(command, AstError):
+                continue
 
-    #     for field in base.fields:
-    #         if attribute.name == field[0]:
-    #             set_type_annotation(attribute, field[1])
-    #             return attribute
+            if doc_string is None and isinstance(command, AstDocstring):
+                doc_string = cast(str, cast(AstValue, command.arguments[0]).value)
 
-    #     for method in base.methods:
-    #         if attribute.name == method[0]:
-    #             set_type_annotation(attribute, method[1])
-    #             return attribute
+            if command.identifier == "def:function:body":
+                signature = cast(AstFunctionSignature, command.arguments[0])
+                annotation = self.get_type_annotation_ref(signature)
 
-    #     set_type_annotation(attribute, UNKNOWN_TYPE)
-    #     return attribute
+                methods.append((signature.name, annotation))
 
-    # @rule(AstCall)
-    # def call(self, call: AstCall):
-    #     if has_type_annotation(call):
-    #         return call
+            if isinstance(command, AstStatement):
+                command = command.arguments[0]
 
-    #     callable = get_type_annotation(call.value)
+                if isinstance(command, AstAssignment) and isinstance(
+                    command.target, AstTargetIdentifier
+                ):
+                    annotation = self.get_type_annotation(command.target)
+                    if isinstance(annotation, InstanceRepresentation):
+                        annotation = annotation.parent
 
-    #     if callable is UNKNOWN_TYPE:
-    #         set_type_annotation(call, UNKNOWN_TYPE)
-    #         return call
+                    fields.append((command.target.value, annotation, command.value))
 
-    #     # If the callable is a type of a type
-    #     # then its type annotation should be the
-    #     # method signature of its constructor
-    #     if get_origin(callable) is type:
-    #         callable = get_args(callable)[0]
-    #         info = FunctionInfo.extract(callable.__init__)
-    #         info.return_annotation = callable
-    #     elif isinstance(callable, TypeInfo):
-    #         info = copy(callable.functions.get("__init__")) or FunctionInfo(
-    #             [("self", ParameterInfo(inspect._empty, inspect._empty))],
-    #             callable,
-    #             callable.doc,
-    #         )
-    #         info.return_annotation = callable
-    #     elif isinstance(callable, FunctionInfo):
-    #         info = callable
-    #     else:
-    #         info = FunctionInfo.extract(callable)
+                if isinstance(command, AstTypeDeclaration):
+                    annotation = self.get_type_annotation(command.type_annotation)
 
-    #     if info is None or info.return_annotation is inspect.Parameter.empty:
-    #         set_type_annotation(call, UNKNOWN_TYPE)
-    #         return call
+                    fields.append((command.identifier.value, annotation, None))
 
-    #     set_type_annotation(call, info.return_annotation)
-    #     return call
+        class_repr = ClassRepresentation(
+            name=name.value,
+            doc_string=doc_string,
+            fields=fields,
+            methods=methods,
+            generics=[],
+            bases=base_types,
+        )
+
+        self.set_type_annotation(node, class_repr)
+        self.set_type_annotation(name, class_repr)
+
+        return node
+
+    def get_bolt_module_type(self, resource_location: AstResourceLocation):
+        module = UNKNOWN_TYPE
+        path = resource_location.get_canonical_value()
+        for _type in [Function, Module]:
+            file = self.ctx.data[cast(type[NamespaceFile], _type)].get(path)
+            if file is None:
+                continue
+
+            module = self.runtime.modules.get(cast(TextFileBase[Any], file))
+
+            assert module, "Referenced module has not been compiled"
+
+            if not module.ast:
+                continue
+
+            metadata = retrieve_metadata(path, module.ast, VariableMetadata)
+
+            if not metadata:
+                BindingStep(
+                    ctx=self.ctx,
+                    index=self.index,
+                    resource_location=path,
+                    source_path=str(Path(file.ensure_source_path()).absolute()),
+                    module=module,
+                    mecha=self.mecha,
+                    runtime=self.runtime,
+                    parser_to_file_type=self.parser_to_file_type
+                )(module.ast)
+
+                metadata = retrieve_metadata(path, module.ast, VariableMetadata)
+                if not metadata:
+                    logging.warning(f"Attempted to index file {path} but failed.")
+                    return UNKNOWN_TYPE
+
+            annotation = metadata.type_annotation
+
+            if annotation is not None and isinstance(annotation, ModuleRepresentation):
+                module = annotation
+                break
+        return module
+
+    @rule(AstFromImport)
+    def from_import(self, node: AstFromImport):
+        if self.type_analysis(node):
+            path = cast(AstResourceLocation, node.arguments[0])
+
+            if path.namespace:
+                module = self.get_bolt_module_type(path)
+                if module is UNKNOWN_TYPE or not isinstance(
+                    module, ModuleRepresentation
+                ):
+                    self.set_type_annotation(node, UNKNOWN_TYPE)
+
+                    for n in node.arguments[1:]:
+                        self.set_type_annotation(n, UNKNOWN_TYPE)
+
+                    return node
+
+                self.set_type_annotation(node, module)
+                for n in node.arguments[1:]:
+                    match n:
+                        case AstImportedItem():
+                            annotation = module.get_member(n.name)
+                            self.set_type_annotation(n, annotation or UNKNOWN_TYPE)
+        return node
+
+    @rule(AstRoot)
+    def root(self, node: AstRoot):
+        if node.location.pos != 0:
+            return node
+
+        if self.type_analysis(node):
+            if not self.module:
+                self.set_type_annotation(node, UNKNOWN_TYPE)
+                return node
+
+            members = []
+
+            for name, variable in self.module.lexical_scope.variables.items():
+                types = []
+                for binding in variable.bindings:
+                    annotation = self.get_type_annotation(binding.origin)
+                    types.append(annotation)
+                    # ...
+
+                if len(types) == 1:
+                    members.append((name, types[0]))
+                elif len(types) > 1:
+                    members.append((name, UnionRepresentation(types)))
+                else:
+                    members.append((name, UNKNOWN_TYPE))
+
+            doc_string = None
+
+            for command in node.commands:
+                if isinstance(command, AstError):
+                    continue
+
+                if isinstance(command, AstDocstring):
+                    doc_string = cast(str, cast(AstValue, command.arguments[0]).value)
+                    break
+
+            self.set_type_annotation(node, ModuleRepresentation(doc_string, members))
+        return node
 
     # @rule(AstCommand)
     # def command(self, command: AstCommand):
@@ -931,8 +1074,10 @@ class Indexer(MutatingReducer):
 
         # The binding step is responsible for attaching the majority of type annotations
         bindings = BindingStep(
+            ctx=self.ctx,
             index=project_index,
             source_path=self.source_path,
+            resource_location=self.resource_location,
             module=module,
             runtime=self.ctx.inject(Runtime),
             mecha=self.ctx.inject(Mecha),
@@ -957,6 +1102,8 @@ class Indexer(MutatingReducer):
             super().__call__,
             bindings,
         ]
+
+        clear_metadata(self.resource_location)
 
         for step in steps:
             try:

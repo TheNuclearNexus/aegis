@@ -1,8 +1,9 @@
 from functools import reduce
 import inspect
+import logging
 from typing import Any, get_origin
 from aegis_core.ast.features.provider import BaseFeatureProvider, DefinitionParams
-from aegis_core.ast.helpers import node_location_to_range, offset_location
+from aegis_core.ast.helpers import node_location_to_range, offset_location, _hash_node
 from aegis_core.ast.metadata import VariableMetadata, attach_metadata, retrieve_metadata
 from aegis_core.reflection import (
     UNKNOWN_TYPE,
@@ -14,7 +15,12 @@ from aegis_core.reflection import (
     search_scope_for_binding,
 )
 from aegis_core.semantics import TokenModifier, TokenType
-from aegis_core.reflection.type_representation import CallableRepresentation, ClassRepresentation
+from aegis_core.reflection.type_representation import (
+    CallableRepresentation,
+    ClassRepresentation,
+    InstanceRepresentation,
+    ReferencedTypeRepresentation,
+)
 import lsprotocol.types as lsp
 from bolt import (
     AstAttribute,
@@ -32,8 +38,8 @@ from mecha import AstNode, Mecha
 __all__ = ["VariableFeatureProvider"]
 
 
-def get_type_annotation(node: AstNode):
-    metadata = retrieve_metadata(node, VariableMetadata)
+def get_type_annotation(resource_location: str, node: AstNode):
+    metadata = retrieve_metadata(resource_location, node, VariableMetadata)
 
     if not metadata:
         return None
@@ -42,13 +48,16 @@ def get_type_annotation(node: AstNode):
 
 
 def add_variable_definition(
-    items: list[lsp.CompletionItem], name: str, variable: Variable
+    resource_location: str,
+    items: list[lsp.CompletionItem],
+    name: str,
+    variable: Variable,
 ):
     possible_types = set()
 
     for binding in variable.bindings:
         origin = binding.origin
-        if annotation := get_type_annotation(origin):
+        if annotation := get_type_annotation(resource_location, origin):
             possible_types.add(annotation)
 
     if len(possible_types) > 0:
@@ -108,11 +117,11 @@ def add_variable_completion(
     items.append(lsp.CompletionItem(name, documentation=documentation, kind=kind))
 
 
-def get_bolt_completions(node: AstNode):
+def get_bolt_completions(resource_location: str, node: AstNode):
     if isinstance(node, AstAttribute):
         node = node.value
 
-    metadata = retrieve_metadata(node, VariableMetadata)
+    metadata = retrieve_metadata(resource_location, node, VariableMetadata)
 
     if not metadata:
         return
@@ -122,46 +131,56 @@ def get_bolt_completions(node: AstNode):
     if type_annotation is UNKNOWN_TYPE:
         return
 
-    type_info = (
-        get_type_info(type_annotation)
-        if not isinstance(type_annotation, TypeInfo)
-        else type_annotation
-    )
+    # type_info = (
+    #     get_type_info(type_annotation)
+    #     if not isinstance(type_annotation, TypeInfo)
+    #     else type_annotation
+    # )
 
     items = []
 
-    for name, type in type_info.fields.items():
-        add_variable_completion(items, name, type)
+    # for name, type in type_info.fields.items():
+    #     add_variable_completion(items, name, type)
 
-    for name, function_info in type_info.functions.items():
-        items.append(
-            lsp.CompletionItem(
-                name,
-                kind=lsp.CompletionItemKind.Function,
-                documentation=lsp.MarkupContent(
-                    kind=lsp.MarkupKind.Markdown,
-                    value=get_function_description(name, function_info),
-                ),
-            )
-        )
+    # for name, function_info in type_info.functions.items():
+    #     items.append(
+    #         lsp.CompletionItem(
+    #             name,
+    #             kind=lsp.CompletionItemKind.Function,
+    #             documentation=lsp.MarkupContent(
+    #                 kind=lsp.MarkupKind.Markdown,
+    #                 value=get_function_description(name, function_info),
+    #             ),
+    #         )
+    #     )
 
     return items
 
 
 def generic_variable_token(
-    variable_name: str, identifier: Any
+    resource_location: str, variable_name: str, identifier: Any
 ) -> list[tuple[AstNode, TokenType, list[TokenModifier]]]:
     nodes: list[tuple[AstNode, TokenType, list[TokenModifier]]] = []
-    annotation = get_type_annotation(identifier)
-    
-    if annotation is not None and (
-        isinstance(annotation, ClassRepresentation)
+    annotation = get_type_annotation(resource_location, identifier)
+
+    while isinstance(annotation, ReferencedTypeRepresentation):
+        metadata = retrieve_metadata(
+            annotation.resource_location, annotation.hash, VariableMetadata
+        )
+        assert metadata
+        annotation = metadata.type_annotation
+
+    if (
+        isinstance(annotation, InstanceRepresentation)
+        and isinstance(annotation.parent, CallableRepresentation)
+        and not isinstance(annotation.parent, ClassRepresentation)
     ):
+        annotation = annotation.parent
+
+    if annotation is not None and (isinstance(annotation, ClassRepresentation)):
         nodes.append((identifier, "class", []))
 
-    elif annotation is not None and (
-        isinstance(annotation, CallableRepresentation)
-    ):
+    elif annotation is not None and (isinstance(annotation, CallableRepresentation)):
         nodes.append((identifier, "function", []))
     else:
         kind = "variable"
@@ -183,17 +202,18 @@ def generic_variable_token(
     return nodes
 
 
-def attribute_token(node: AstAttribute | AstTargetAttribute):
+def attribute_token(resource_location, node: AstAttribute | AstTargetAttribute):
     temp_node = AstIdentifier(
         offset_location(node.end_location, -len(node.name)),
         node.end_location,
         node.name,
     )
 
-    metadata = retrieve_metadata(temp_node, VariableMetadata)
-    attach_metadata(temp_node, metadata or VariableMetadata())
+    metadata = retrieve_metadata(resource_location, node, VariableMetadata)
+    attach_metadata("temp", temp_node, metadata or VariableMetadata())
 
     return generic_variable_token(
+        "temp",
         node.name,
         temp_node,
     )
@@ -213,7 +233,7 @@ class VariableFeatureProvider(
         node = params.node
         text_range = params.text_range
 
-        metadata = retrieve_metadata(node, VariableMetadata)
+        metadata = retrieve_metadata(params.resource_location, node, VariableMetadata)
         name = (
             node.value
             if not isinstance(node, (AstAttribute, AstTargetAttribute, AstImportedItem))
@@ -223,6 +243,8 @@ class VariableFeatureProvider(
         if metadata and metadata.type_annotation:
 
             type_annotation = metadata.type_annotation
+
+            logging.debug(f"\n\n{id(type_annotation)}\n{_hash_node(node)}\n\n")
 
             description = get_annotation_description(name, type_annotation)
 
@@ -240,7 +262,7 @@ class VariableFeatureProvider(
 
     @classmethod
     def completion(cls, params):
-        return get_bolt_completions(params.node)
+        return get_bolt_completions(params.resource_location, params.node)
 
     @classmethod
     def semantics(
@@ -248,15 +270,21 @@ class VariableFeatureProvider(
     ) -> list[tuple[AstNode, TokenType, list[TokenModifier]]] | None:
         match params.node:
             case AstIdentifier():
-                return generic_variable_token(params.node.value, params.node)
+                return generic_variable_token(
+                    params.resource_location, params.node.value, params.node
+                )
             case AstTargetIdentifier():
-                return generic_variable_token(params.node.value, params.node)
+                return generic_variable_token(
+                    params.resource_location, params.node.value, params.node
+                )
             case AstAttribute():
-                return attribute_token(params.node)
+                return attribute_token(params.resource_location, params.node)
             case AstTargetAttribute():
-                return attribute_token(params.node)
+                return attribute_token(params.resource_location, params.node)
             case AstImportedItem():
-                return generic_variable_token(params.node.name, params.node)
+                return generic_variable_token(
+                    params.resource_location, params.node.name, params.node
+                )
         return None
 
     @classmethod
@@ -278,7 +306,7 @@ class VariableFeatureProvider(
 
                 if module is None:
                     return
-                
+
                 scope = module.lexical_scope
 
                 result = search_scope_for_binding(var_name, ident, scope)
@@ -291,5 +319,3 @@ class VariableFeatureProvider(
                 range = node_location_to_range(binding.origin)
 
                 return lsp.Location(params.text_document_uri, range)
-
-
