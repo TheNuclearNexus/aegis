@@ -35,7 +35,8 @@ import {
 import { execFile, ExecFileException } from "child_process";
 import * as JSZip from "jszip";
 
-const MIN_PYTHON = semver.parse("3.10.0");
+const MIN_PYTHON = semver.parse("3.14.0");
+const MIN_BEET = semver.parse("0.113.0");
 
 // Some other nice to haves.
 // TODO: Check selected env satisfies aegis' requirements - if not offer to run the select env command.
@@ -52,11 +53,11 @@ let logger: vscode.LogOutputChannel;
 function registerCommand(
     context: vscode.ExtensionContext,
     commandIdentifier: string,
-    callback: () => any
+    callback: () => any,
 ) {
     logger.info(commandIdentifier);
     context.subscriptions.push(
-        vscode.commands.registerCommand(commandIdentifier, callback)
+        vscode.commands.registerCommand(commandIdentifier, callback),
     );
 }
 
@@ -75,18 +76,18 @@ export async function activate(context: vscode.ExtensionContext) {
 
     registerCommand(context, "aegis.server.openServerLog", async () => {
         vscode.window.showTextDocument(
-            vscode.Uri.file(path.join(context.extensionPath, "aegis.log"))
+            vscode.Uri.file(path.join(context.extensionPath, "aegis.log")),
         );
     });
 
     registerCommand(context, "aegis.server.updateServer", async () => {
         const resp = await fetch(
-            "https://nightly.link/TheNuclearNexus/aegis-language-server/workflows/main/main/extension.zip"
+            "https://nightly.link/TheNuclearNexus/aegis-language-server/workflows/main/main/extension.zip",
         );
 
         if (!resp.ok)
             return vscode.window.showErrorMessage(
-                "Failed to download extension\n" + resp.statusText
+                "Failed to download extension\n" + resp.statusText,
             );
 
         const buffer = await resp.arrayBuffer();
@@ -102,7 +103,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
         if (extension === undefined) {
             return vscode.window.showErrorMessage(
-                "Failed to find .vsix in zip"
+                "Failed to find .vsix in zip",
             );
         }
 
@@ -110,17 +111,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
         fs.writeFileSync(
             filePath,
-            await zip.file(extension).async("nodebuffer")
+            await zip.file(extension).async("nodebuffer"),
         );
 
         if (context.extensionMode == vscode.ExtensionMode.Production) {
             await vscode.commands.executeCommand(
                 "workbench.extensions.uninstallExtension",
-                "thenuclearnexus.aegis-language-server"
+                "thenuclearnexus.aegis-language-server",
             );
             vscode.commands.executeCommand(
                 "workbench.extensions.installExtension",
-                vscode.Uri.file(filePath)
+                vscode.Uri.file(filePath),
             );
         }
     });
@@ -142,7 +143,7 @@ export async function activate(context: vscode.ExtensionContext) {
             logger.info("python env modified, restarting server...");
 
             await startLangServer(context);
-        })
+        }),
     );
 
     // ... or if they change a relevant config option
@@ -155,7 +156,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 logger.info("config modified, restarting server...");
                 await startLangServer(context);
             }
-        })
+        }),
     );
 
     context.subscriptions.push(
@@ -171,7 +172,7 @@ export async function activate(context: vscode.ExtensionContext) {
             logger.info("Config modified, restarting server");
 
             await startLangServer(context);
-        })
+        }),
     );
 
     // Start the language server once the user opens the first text document...
@@ -182,7 +183,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     await vscode.workspace.findFiles(
                         "**/*.{mcfunction,bolt}",
                         null,
-                        1
+                        1,
                     )
                 ).length == 0
             )
@@ -192,7 +193,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window
                     .showWarningMessage(
                         ".bolt files aren't associated with mcfunction, this might break highlighting.",
-                        "Configure Language Mode"
+                        "Configure Language Mode",
                     )
                     .then((s) => {
                         if (s == "Configure Language Mode")
@@ -203,7 +204,7 @@ export async function activate(context: vscode.ExtensionContext) {
             if (!client && !didClientFail) {
                 await startLangServer(context);
             }
-        })
+        }),
     );
 }
 
@@ -247,7 +248,7 @@ async function startLangServer(context: vscode.ExtensionContext) {
     const pythonCommand = await getPythonCommand(resource);
 
     logger.debug("Checking enviroment...");
-    const successful = await checkEnviroment(pythonCommand);
+    const successful = await checkEnviroment(context, pythonCommand);
     if (!successful) {
         clientStarting = false;
         didClientFail = true;
@@ -277,7 +278,7 @@ async function startLangServer(context: vscode.ExtensionContext) {
                                   reader: clientSocket,
                                   writer: clientSocket,
                               });
-                          }
+                          },
                       );
                   });
               }
@@ -311,7 +312,7 @@ async function startLangServer(context: vscode.ExtensionContext) {
     for (const result of results) {
         if (result.status === "rejected") {
             logger.error(
-                `There was a error starting the server: ${result.reason}`
+                `There was a error starting the server: ${result.reason}`,
             );
         }
     }
@@ -319,13 +320,16 @@ async function startLangServer(context: vscode.ExtensionContext) {
     logger.debug("server has started");
 }
 
-async function checkEnviroment(pythonCommand: string[]): Promise<boolean> {
+async function checkEnviroment(
+    context: vscode.ExtensionContext,
+    pythonCommand: string[],
+): Promise<boolean> {
     const configurePythonAction = (selection: "Configure Python") => {
         if (selection != "Configure Python") return;
 
         if (!python)
             return vscode.window.showErrorMessage(
-                "Python extension is not installed!"
+                "Python extension is not installed!",
             );
 
         vscode.commands.executeCommand("python.setInterpreter");
@@ -335,7 +339,7 @@ async function checkEnviroment(pythonCommand: string[]): Promise<boolean> {
         vscode.window
             .showErrorMessage(
                 "No Python installation configured!",
-                "Configure Python"
+                "Configure Python",
             )
             .then(configurePythonAction);
         return false;
@@ -350,30 +354,59 @@ async function checkEnviroment(pythonCommand: string[]): Promise<boolean> {
 
     await checkForVenv(pythonCommand[0]);
 
-    if (!(await hasBeet(pythonCommand[0]))) {
-        vscode.window
-            .showErrorMessage(
-                "Beet is not installed in this enviroment!",
-                "Install Beet",
-                "Don't Show Again"
-            )
-            .then(async (selection) => {
-                if (selection == "Install Beet")
-                    await installBeet(pythonCommand[0]);
-                else if (selection == "Don't Show Again") {
-                    vscode.workspace
-                        .getConfiguration("aegis")
-                        .update(
-                            "aegis.client.hide_env_warnings",
-                            true,
-                            vscode.ConfigurationTarget.Workspace
-                        );
-                }
-            });
-        return false;
-    }
+    const versionResult = await hasBeet(context, pythonCommand[0]);
 
-    return true;
+    switch (versionResult) {
+        case "absent":
+        case "outdated":
+            vscode.window
+                .showErrorMessage(
+                    versionResult === "absent"
+                        ? "Beet is not installed in this enviroment!"
+                        : `The installed version of Beet is outdated! Aegis requires atleast ${MIN_BEET.toString()}`,
+                    versionResult === "absent"
+                        ? "Install Beet"
+                        : "Upgrade Beet",
+                    "Don't Show Again",
+                )
+                .then(async (selection) => {
+                    if (
+                        selection == "Install Beet" ||
+                        selection == "Upgrade Beet"
+                    )
+                        await installBeet(pythonCommand[0]);
+                    else if (selection == "Don't Show Again") {
+                        vscode.workspace
+                            .getConfiguration("aegis")
+                            .update(
+                                "aegis.client.hide_env_warnings",
+                                true,
+                                vscode.ConfigurationTarget.Workspace,
+                            );
+                    }
+                });
+            return false;
+        case "errored":
+            vscode.window
+                .showWarningMessage(
+                    "An error occurred while checking for Beet. Aegis will attempt to start regardless.",
+                    "Don't Show Again",
+                )
+                .then((selection) => {
+                    if (selection == "Don't Show Again") {
+                        vscode.workspace
+                            .getConfiguration("aegis")
+                            .update(
+                                "aegis.client.hide_env_warnings",
+                                true,
+                                vscode.ConfigurationTarget.Workspace,
+                            );
+                    }
+                });
+            return true;
+        case "present":
+            return true;
+    }
 }
 
 function updateFileAssociation() {
@@ -387,7 +420,7 @@ function updateFileAssociation() {
 
 async function runPythonCommand(
     pythonCommand: string,
-    args: string[]
+    args: string[],
 ): Promise<[ExecFileException | null, string]> {
     return new Promise<[ExecFileException | null, string]>((resolve) => {
         execFile(pythonCommand, args, (error, stdout, _) => {
@@ -414,7 +447,7 @@ async function checkForVenv(pythonCommand: string) {
                     "It's recommended to use Beet within a Virtual Enviroment",
                     "Configure Python",
                     "Learn More",
-                    "Don't Show Again"
+                    "Don't Show Again",
                 )
                 .then((selection) => {
                     if (selection == "Configure Python") {
@@ -422,8 +455,8 @@ async function checkForVenv(pythonCommand: string) {
                     } else if (selection == "Learn More") {
                         vscode.env.openExternal(
                             vscode.Uri.parse(
-                                "https://docs.python.org/3/library/venv.html"
-                            )
+                                "https://docs.python.org/3/library/venv.html",
+                            ),
                         );
                     } else if (selection == "Don't Show Again") {
                         vscode.workspace
@@ -431,7 +464,7 @@ async function checkForVenv(pythonCommand: string) {
                             .update(
                                 "aegis.client.hide_env_warnings",
                                 true,
-                                vscode.ConfigurationTarget.Workspace
+                                vscode.ConfigurationTarget.Workspace,
                             );
                     }
                 });
@@ -441,20 +474,33 @@ async function checkForVenv(pythonCommand: string) {
     }
 }
 
-async function hasBeet(pythonCommand: string): Promise<boolean> {
+async function hasBeet(
+    context: vscode.ExtensionContext,
+    pythonCommand: string,
+): Promise<"errored" | "absent" | "outdated" | "present"> {
     logger.debug("Checking if beet is install in the enviroment...");
     try {
-        const [error, stdout] = await runPythonCommand(pythonCommand, [
-            "-c",
-            "import importlib.util; print(importlib.util.find_spec('beet') is None)",
-        ]);
+        const script = path.join(
+            context.extensionPath,
+            "resources",
+            "beet_check.py",
+        );
+        const [error, stdout] = await runPythonCommand(pythonCommand, [script]);
 
         if (error) throw error;
 
-        return stdout.includes("False");
+        if (stdout.includes("False")) return "absent";
+
+        const beetVersion = semver.parse(stdout.split(" ")[1]);
+
+        if (beetVersion && semver.lt(beetVersion, MIN_BEET)) {
+            return "outdated";
+        }
+
+        return "present";
     } catch (e) {
         logger.error(`Error encountered while checking for beet!\n${e}`);
-        return false;
+        return "errored";
     }
 }
 
@@ -465,8 +511,9 @@ async function installBeet(pythonCommand: string) {
             "-m",
             "pip",
             "install",
-            "beet",
-            "aegis",
+            "-U",
+            `beet>=${MIN_BEET.toString()}`,
+            "mecha",
             "bolt",
         ]);
         if (error) throw error;
@@ -474,7 +521,7 @@ async function installBeet(pythonCommand: string) {
         vscode.window
             .showInformationMessage(
                 "Beet has been successfully installed!",
-                "Restart Language Server"
+                "Restart Language Server",
             )
             .then((selection) => {
                 if (selection != "Restart Language Server") return;
@@ -527,14 +574,14 @@ function startDebugging(): Promise<void> {
     if (!vscode.workspace.workspaceFolders) {
         logger.error("Unable to start debugging, there is no workspace.");
         return Promise.reject(
-            "Unable to start debugging, there is no workspace."
+            "Unable to start debugging, there is no workspace.",
         );
     }
     // TODO: Is there a more reliable way to ensure the debug adapter is ready?
     setTimeout(async () => {
         await vscode.debug.startDebugging(
             vscode.workspace.workspaceFolders[0],
-            "aegis: Debug Server"
+            "aegis: Debug Server",
         );
     }, 2000);
 }
@@ -558,7 +605,7 @@ function getClientOptions(): LanguageClientOptions {
 async function executeServerCommand() {
     if (!client || client.state !== State.Running) {
         await vscode.window.showErrorMessage(
-            "There is no language server running."
+            "There is no language server running.",
         );
         return;
     }
@@ -571,7 +618,7 @@ async function executeServerCommand() {
         const version = info?.version || "";
 
         await vscode.window.showInformationMessage(
-            `${name} ${version} does not implement any commands.`
+            `${name} ${version} does not implement any commands.`,
         );
         return;
     }
@@ -585,10 +632,10 @@ async function executeServerCommand() {
     logger.info(`executing command: '${commandName}'`);
 
     const result = await vscode.commands.executeCommand(
-        commandName /* if your command accepts arguments you can pass them here */
+        commandName /* if your command accepts arguments you can pass them here */,
     );
     logger.info(
-        `${commandName} result: ${JSON.stringify(result, undefined, 2)}`
+        `${commandName} result: ${JSON.stringify(result, undefined, 2)}`,
     );
 }
 
@@ -601,7 +648,7 @@ async function executeServerCommand() {
  * @returns The full python command needed in order to start the server.
  */
 async function getPythonCommand(
-    resource?: vscode.Uri
+    resource?: vscode.Uri,
 ): Promise<string[] | undefined> {
     const pythonPath = await getPythonInterpreter(resource);
     if (!pythonPath) {
@@ -618,7 +665,7 @@ async function getPythonCommand(
         const debugArgs = await python.debug.getRemoteLauncherCommand(
             "localhost",
             4000,
-            true
+            true,
         );
         // Debugpy recommends we disable frozen modules
         command.push("-Xfrozen_modules=off", ...debugArgs);
@@ -639,13 +686,13 @@ async function getPythonCommand(
  * @returns The python interpreter to use to launch the server
  */
 async function getPythonInterpreter(
-    resource?: vscode.Uri
+    resource?: vscode.Uri,
 ): Promise<string | undefined> {
     const config = vscode.workspace.getConfiguration("aegis.server", resource);
     const pythonPath = config.get<string>("pythonPath");
     if (pythonPath) {
         logger.info(
-            `Using user configured python environment: '${pythonPath}'`
+            `Using user configured python environment: '${pythonPath}'`,
         );
         return pythonPath;
     }
@@ -656,19 +703,18 @@ async function getPythonInterpreter(
 
     if (resource) {
         logger.info(
-            `Looking for environment in which to execute: '${resource.toString()}'`
+            `Looking for environment in which to execute: '${resource.toString()}'`,
         );
     }
     // Use whichever python interpreter the user has configured.
     const activeEnvPath =
         python.environments.getActiveEnvironmentPath(resource);
     logger.info(
-        `Found environment: ${activeEnvPath.id}: ${activeEnvPath.path}`
+        `Found environment: ${activeEnvPath.id}: ${activeEnvPath.path}`,
     );
 
-    const activeEnv = await python.environments.resolveEnvironment(
-        activeEnvPath
-    );
+    const activeEnv =
+        await python.environments.resolveEnvironment(activeEnvPath);
     if (!activeEnv) {
         logger.error(`Unable to resolve envrionment: ${activeEnvPath}`);
         return;
@@ -692,7 +738,7 @@ async function getPythonInterpreter(
 
         const response = await vscode.window.showErrorMessage(
             message,
-            "Change Environment"
+            "Change Environment",
         );
         if (!response) {
             return;
