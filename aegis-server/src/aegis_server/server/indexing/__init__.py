@@ -319,9 +319,9 @@ class ProjectIndexer(Reducer):
             add_representation(self.resource_location, path_node, file_type)
             
             if file not in self.mecha.database.session:
-                compilation_unit = self.mecha.database.setdefault(file, CompilationUnit())
+                compilation_unit = self.mecha.database.setdefault(file, CompilationUnit()) #type: ignore
                 compilation_unit.priority = self.priority - 1
-                self.mecha.database.enqueue(file, priority=self.priority - 1)
+                self.mecha.database.enqueue(file, priority=self.priority - 1) #type: ignore
 
         return node
 
