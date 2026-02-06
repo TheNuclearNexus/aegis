@@ -1,5 +1,6 @@
 from heapq import heapify
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,8 @@ class ResourceIndice:
 def valid_resource_location(path: str):
     return bool(re.match(r"^[a-z0-9_\.]+:[a-z0-9_\.]+(\/?[a-z0-9_\.]+)*$", path))
 
+def normalize_path(path: str):
+    return os.path.normcase(os.path.normpath(path))
 
 @dataclass
 class ResourceIndex:
@@ -51,6 +54,8 @@ class ResourceIndex:
 
         if isinstance(path, File):
             path = str(Path(path.ensure_source_path()).absolute())
+
+        path = normalize_path(path)
 
         removed = []
 
@@ -70,28 +75,30 @@ class ResourceIndex:
 
     def add_definition(
         self,
-        resource_path: str,
+        resource_location: str,
         source_path: str,
         source_location: FilePointer = (
             SourceLocation(0, 0, 0),
             SourceLocation(0, 0, 0),
         ),
     ):
-        if not valid_resource_location(resource_path):
-            raise Exception(f"Invalid resource location {resource_path}")
+        if not valid_resource_location(resource_location):
+            raise Exception(f"Invalid resource location {resource_location}")
+
+        source_path = normalize_path(source_path)
 
         self._lock.acquire()
 
-        indice = self._files.setdefault(resource_path, ResourceIndice())
+        indice = self._files.setdefault(resource_location, ResourceIndice())
         locations = indice.definitions.setdefault(source_path, set())
         locations.add(source_location)
 
         self._lock.release()
 
     def get_definitions(
-        self, resource_path: str
+        self, resource_location: str
     ) -> list[tuple[str, SourceLocation, SourceLocation]]:
-        if not (file := self._files.get(resource_path)):
+        if not (file := self._files.get(resource_location)):
             return []
 
         definitions = []
@@ -102,9 +109,9 @@ class ResourceIndex:
         return definitions
 
     def get_references(
-        self, resource_path: str
+        self, resource_location: str
     ) -> list[tuple[str, SourceLocation, SourceLocation]]:
-        if not (file := self._files.get(resource_path)):
+        if not (file := self._files.get(resource_location)):
             return []
 
         references = []
@@ -125,6 +132,8 @@ class ResourceIndex:
     ):
         if not valid_resource_location(resource_path):
             raise Exception(f"Invalid resource location {resource_path}")
+
+        source_path = normalize_path(source_path)
 
         self._lock.acquire()
 
@@ -190,7 +199,7 @@ class AegisProjectIndex:
                 break
 
         if index != -1:
-            mecha.database.queue.pop(i)
+            mecha.database.queue.pop(index)
             heapify(mecha.database.queue)
 
     def dump(self) -> str:

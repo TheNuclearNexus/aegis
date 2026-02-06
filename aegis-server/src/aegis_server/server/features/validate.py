@@ -12,7 +12,17 @@ from functools import partial
 from pathlib import Path, PurePath
 from typing import Any, TypeVar
 
-from beet import Context, DataPack, Function, NamespaceFile, PackageablePath, TextFileBase
+from beet import (
+    Advancement,
+    Context,
+    DataPack,
+    Function,
+    LootTable,
+    NamespaceFile,
+    PackageablePath,
+    Predicate,
+    TextFileBase,
+)
 from beet.core.utils import extra_field, required_field
 from bolt import Module, Runtime
 from mecha import (
@@ -30,7 +40,7 @@ from mecha import (
     Mecha,
     MutatingReducer,
     rule,
-    dispatch
+    dispatch,
 )
 from mecha.ast import AstError
 from mecha.contrib.nested_location import (
@@ -41,7 +51,12 @@ from pygls.workspace import TextDocument
 import lsprotocol.types as lsp
 from tokenstream import InvalidSyntax, SourceLocation, TokenStream
 
-from ..indexing import AegisProjectIndex, Indexer
+from ..indexing import (
+    AegisProjectIndex,
+    AstFreezer,
+    ProjectIndexer,
+    TypeAnnotationResolver,
+)
 from ..shadows.compile_document import (
     COMPILATION_RESULTS,
     CompilationError,
@@ -49,7 +64,7 @@ from ..shadows.compile_document import (
 )
 from ..shadows.context import LanguageServerContext
 
-TIMEOUT_DURATION = 10
+TIMEOUT_DURATION = 30
 
 SUPPORTED_EXTENSIONS = [Function.extension, Module.extension]
 T = TypeVar("T", bound=AstNode)
@@ -129,7 +144,9 @@ async def validate_function(
             res = compiled_doc.diagnostics
 
         except TimeoutError as ex:
-            message = f"Compilation took longer than {TIMEOUT_DURATION} seconds, aborting"
+            message = (
+                f"Compilation took longer than {TIMEOUT_DURATION} seconds, aborting"
+            )
             logging.debug(f"{message}\n{ex}")
             ctx.ls.show_message(message, lsp.MessageType.Error)
             res = []
@@ -221,26 +238,32 @@ async def parse_function(
     source_path: str,
     file_instance: Function | Module,
 ) -> CompiledDocument:
+    mecha = ctx.inject(Mecha)
+    runtime = ctx.inject(Runtime)
 
     start = time.time()
 
     loop = asyncio.get_running_loop()
 
+    if file_instance in mecha.database:
+        del mecha.database[file_instance]
+
     with ThreadPoolExecutor() as pool:
         try:
-            ast, errors = await asyncio.wait_for(
-                loop.run_in_executor(pool, compile, ctx, resource_location, source_path, file_instance),
-                timeout=TIMEOUT_DURATION
+            results = await asyncio.wait_for(
+                loop.run_in_executor(
+                    pool, compile, ctx, resource_location, source_path, file_instance
+                ),
+                timeout=TIMEOUT_DURATION,
             )
+            ast, errors = results[file_instance]
+
         except TimeoutError as exec:
             raise exec
 
     logging.debug(f"Compilation for {source_path} took {time.time() - start}s")
 
     # # Parse the stream
-    mecha = ctx.inject(Mecha)
-    runtime = ctx.inject(Runtime)
-
     compilation_unit = mecha.database[file_instance]
     compiled_module = runtime.modules.registry.get(file_instance)
     logging.debug(compiled_module.lexical_scope if compiled_module else "")
@@ -269,10 +292,10 @@ def compile(
     resource_location: str,
     source_path: str,
     source_file: Function | Module,
-) -> tuple[AstRoot, list[InvalidSyntax]]:
+) -> dict[TextFileBase[Any], tuple[AstNode, list[InvalidSyntax | Diagnostic]]]:
     mecha = ctx.inject(Mecha)
     runtime = ctx.inject(Runtime)
-    diagnostics = []
+    diagnostics: dict[TextFileBase[Any], list[InvalidSyntax | Diagnostic]] = dict()
 
     try:
         project_index = ctx.inject(AegisProjectIndex)
@@ -281,14 +304,52 @@ def compile(
         tb = "\n".join(traceback.format_tb(e.__traceback__))
         logging.error(f"{e}\n{tb}")
 
-    indexer = Indexer(
-        ctx=ctx,
-        resource_location=resource_location,
-        source_path=source_path,
-        file_instance=source_file,
+    project_index[type(source_file)].add_definition(resource_location, source_path)
+
+    logging.debug(f"{list(ctx.data.functions.keys())}")
+
+    nested_location_transformer = NestedLocationTransformer(
+        nested_location_resolver=NestedLocationResolver(ctx=ctx)
     )
 
-    with use_steps(mecha, [runtime.evaluate, indexer,  mecha.lint, mecha.transform]):
+    project_indexer = ProjectIndexer(
+        ctx=ctx,
+        index=project_index,
+        mecha=mecha,
+        # argument parser to resource type
+        parser_to_file_type={
+            "minecraft:advancement": Advancement,
+            "minecraft:function": Function,
+            "minecraft:predicate": Predicate,
+            "minecraft:loot_table": LootTable,
+        },
+    )
+
+    try:
+        type_annotation_resolver = TypeAnnotationResolver(
+            ctx=ctx,
+            index=project_index,
+            runtime=runtime,
+            mecha=mecha,
+        )
+    except Exception as e:
+        tb = "\n".join(traceback.format_tb(e.__traceback__))
+        logging.error(f"{e}\n{tb}")
+        raise e
+
+    frozen_asts = AstFreezer(mecha=mecha)
+
+    with use_steps(
+        mecha,
+        [
+            nested_location_transformer,
+            project_indexer,
+            type_annotation_resolver,
+            frozen_asts,
+            mecha.lint,
+            mecha.transform,
+        ],
+    ):
 
         # Configure the database to compile the file
         compiled_unit = CompilationUnit(
@@ -299,12 +360,20 @@ def compile(
         database.enqueue(source_file)
 
         for step, file_instance in database.process_queue():
-            logging.info(f"{database.queue}")
-            compilation_unit = mecha.database[file_instance]
-            logging.debug(f"--- Step {step} for {compilation_unit.filename} ---")
+            compilation_unit = mecha.database.get(file_instance)
+            
+            if not compilation_unit:
+                logging.debug(f"--- Step {step} could not find a compilation unit for {file_instance} ---")
+                continue
+
+            logging.debug(f"--- Step {step} for {compilation_unit.filename} @ {compilation_unit.priority} ---")
             start = time.time()
 
             if step < 0:
+                if compilation_unit.ast is not None:
+                    mecha.database.enqueue(file_instance, 0, compilation_unit.priority)
+                    continue
+
                 try:
                     compilation_unit.source = file_instance.text
                     # Create the token stream
@@ -323,10 +392,10 @@ def compile(
                         file_instance=file_instance,
                     ).collect(ast)
 
-                    diagnostics.extend(errors)
+                    diagnostics.setdefault(file_instance, []).extend(errors)
 
                     compilation_unit.ast = ast
-                    mecha.database.enqueue(file_instance, 0)
+                    mecha.database.enqueue(file_instance, 0, compilation_unit.priority)
 
                 except InvalidSyntax as exec:
                     logging.error(f"Failed to parse: {exec}")
@@ -353,6 +422,8 @@ def compile(
                                 )
 
                             compilation_unit.diagnostics.extend(step_diagnostics)
+                        else:
+                            logging.debug(f"Step {step} yielded no ast?")
                 except McCompilationError as e:
                     cause = e.__cause__
                     tb = traceback.extract_tb(cause.__traceback__)[-1]
@@ -360,7 +431,7 @@ def compile(
                     logging.error(tb)
 
                     if Path(tb.filename) == Path(source_path):
-                        diagnostics.append(
+                        diagnostics.setdefault(file_instance, []).append(
                             Diagnostic(
                                 message=str(cause),
                                 level="error",
@@ -376,5 +447,12 @@ def compile(
                     logging.error("\n".join(traceback.format_tb(cause.__traceback__)))
 
             logging.debug(f"Execution took {time.time() - start}s")
-            
-    return indexer.output_ast, diagnostics
+
+    results: dict[TextFileBase[Any], tuple[AstNode, list[InvalidSyntax | Diagnostic]]] = dict()
+    for file in frozen_asts:
+        results[file] = (
+            frozen_asts[file],
+            diagnostics.get(file, []),
+        )
+
+    return results

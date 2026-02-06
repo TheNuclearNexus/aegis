@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 import traceback
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import reduce
 from types import ModuleType
 from typing import (
@@ -72,9 +72,11 @@ from mecha import (
     AstRoot,
     AstSelectorArgument,
     CompilationError,
+    CompilationUnit,
     Mecha,
     MutatingReducer,
     Reducer,
+    Visitor,
     rule,
 )
 from mecha.contrib.nested_location import (
@@ -193,98 +195,174 @@ def add_representation(resource_location, arg_node: AstNode, type: Any):
 
 
 @dataclass
-class InitialStep(Reducer):
-    helpers: dict[str, Any] = extra_field(default_factory=dict)
+class ProjectIndexer(Reducer):
+    ctx: LanguageServerContext = required_field()
+    mecha: Mecha = required_field()
+    index: AegisProjectIndex = required_field()
+    parser_to_file_type: dict[str, type[NamespaceFile]] = required_field()
 
-    # @rule(AstFromImport)
-    # def from_import(self, from_import: AstFromImport):
-    #     module_path = from_import.arguments[0]
+    source_path: str = field(init=False)
+    resource_location: str = field(init=False)
+    priority: int = field(init=False)
 
-    #     if not isinstance(module_path, AstResourceLocation):
-    #         return from_import
 
-    #     if module_path.namespace:
-    #         if (
-    #             not (
-    #                 compilation := COMPILATION_RESULTS.get(
-    #                     module_path.get_canonical_value()
-    #                 )
-    #             )
-    #             or compilation.compiled_module is None
-    #         ):
-    #             return from_import
+    def __call__(self, node: AbstractNode, *args: Any, **kwargs: Any) -> Any:
+        current = self.mecha.database.current
+        
+        file_type = cast(type[NamespaceFile], type(current))
 
-    #         scope = compilation.compiled_module.lexical_scope
-    #         # logging.debug(compilation.compiled_module)
+        unit = self.mecha.database[current]
+        
+        if unit.resource_location:
+            definitions = self.index[file_type].get_definitions(unit.resource_location)
 
-    #         for argument in from_import.arguments[1:]:
-    #             if isinstance(argument, AstImportedItem) and (
-    #                 export := scope.variables.get(argument.name)
-    #             ):
-    #                 set_type_annotation(
-    #                     argument, get_type_annotation(export.bindings[0].origin)
-    #                 )
-    #     else:
-    #         self.handle_python_module(from_import, module_path)
+            # This is a virtual file if it has no definitions
+            if len(definitions) == 0:
+                return node
+            
+            self.source_path = definitions[0][0]
+            self.resource_location = unit.resource_location
+            self.priority = unit.priority
+        else:
+            return node
 
-    #     return from_import
+        return super().__call__(node, *args, **kwargs)
 
-    # def handle_python_module(
-    #     self, from_import: AstFromImport, module_path: AstResourceLocation
-    # ):
-    #     try:
-    #         module: ModuleType = self.helpers["import_module"](module_path.get_value())
-    #     except:
-    #         logging.error(f"Can't import module {module_path}")
-    #         return
+    @rule(AstCommand)
+    def command(self, command: AstCommand):
+        if not (prototype := self.mecha.spec.prototypes.get(command.identifier)):
+            return command
 
-    #     for argument in from_import.arguments[1:]:
-    #         if isinstance(argument, AstImportedItem) and hasattr(module, argument.name):
-    #             annotation = TypeRepresentation.from_python(getattr(module, argument.name))
-    #             set_type_annotation(argument, annotation)
+        nested_root_found = False
 
-    # @rule(AstValue)
-    # def value(self, value: AstValue):
-    #     if has_type_annotation(value):
-    #         return value
+        for i, argument in enumerate(command.arguments):
 
-    #     set_type_annotation(value, TypeRepresentation.from_node(value.value))
+            match argument:
+                case AstResourceLocation():
 
-    #     return value
+                    # Attempt to get the parser for the argument
+                    argument_tree = prototype.get_argument(i)
+                    command_tree_node = self.mecha.spec.tree.get(argument_tree.scope)
+                    if not (command_tree_node and command_tree_node.parser):
+                        continue
 
-    # @rule(AstResourceLocation)
-    # def resource_location(self, node: AstResourceLocation):
+                    # If the parser is registered or the parent argument's name is registered
+                    # use that file type for its representation
+                    file_type = self.parser_to_file_type.get(
+                        command_tree_node.parser
+                    ) or self.index.resource_name_to_type.get(argument_tree.scope[-2])
 
-    #     if isinstance(node, AstNestedLocation):
-    #         metadata = (
-    #             retrieve_metadata(node, ResourceLocationMetadata)
-    #             or ResourceLocationMetadata()
-    #         )
+                    if file_type is None:
+                        continue
 
-    #         metadata.unresolved_path = f"~/" + node.path
+                    # Ensure that unfinished paths are not added to the project index
+                    resolved_path = argument.get_canonical_value()
 
-    #         attach_metadata(node, metadata)
+                    # If the argument is a tag then we need to remove the leading
+                    # "#" and try to change the file type to the tag equivalent
+                    # ex. Function -> FunctionTag
+                    if argument.is_tag:
+                        resolved_path = resolved_path[1:]
+                        if not (
+                            file_type := self.index.resource_name_to_type.get(
+                                file_type.snake_name + "_tag"
+                            )
+                        ):
+                            continue
 
-    #     return node
+                    add_representation(self.resource_location, argument, file_type)
 
+                    if not valid_resource_location(resolved_path):
+                        continue
+
+                    # Check the command tree for the pattern:
+                    # resource_location, defintion
+                    # which is used by the nested resource plugin to define a new resource
+                    if (
+                        isinstance(command.arguments[-1], (AstRoot, AstJson))
+                        and not nested_root_found
+                    ):
+                        nested_root_found = True
+                        self.index[file_type].add_definition(
+                            resolved_path,
+                            self.source_path,
+                            (argument.location, argument.end_location),
+                        )
+                    # If the pattern isn't matched then just treat it as a reference
+                    # and not a definition of thre resource
+                    else:
+                        self.index[file_type].add_reference(
+                            resolved_path,
+                            self.source_path,
+                            (argument.location, argument.end_location),
+                        )
+
+        return command
+    
+    @rule(AstFromImport)
+    def from_import(self, node: AstFromImport):
+        path_node = cast(AstResourceLocation, node.arguments[0])
+
+        path = path_node.get_canonical_value()
+
+        for file_type in [Function, Module]:
+            file = self.ctx.data[cast(type[NamespaceFile], file_type)].get(path)
+            if file is None:
+                continue
+
+            self.index[file_type].add_reference(
+                path,
+                self.source_path,
+                (node.location, node.end_location),
+            )
+
+            add_representation(self.resource_location, path_node, file_type)
+            
+            if file not in self.mecha.database.session:
+                compilation_unit = self.mecha.database.setdefault(file, CompilationUnit())
+                compilation_unit.priority = self.priority - 1
+                self.mecha.database.enqueue(file, priority=self.priority - 1)
+
+        return node
 
 type IdentifierLike = AstIdentifier | AstFunctionSignatureArgument
 
 
 @dataclass
-class BindingStep(Reducer):
+class TypeAnnotationResolver(Reducer):
     ctx: LanguageServerContext = required_field()
     index: AegisProjectIndex = required_field()
-    source_path: str = required_field()
-    resource_location: str = required_field()
+
     runtime: Runtime = required_field()
     mecha: Mecha = required_field()
 
-    parser_to_file_type: dict[str, type[NamespaceFile]] = required_field()
+    source_path: str = field(init=False)
+    resource_location: str = field(init=False)
+    module: Optional[CompiledModule] = field(init=False)
 
-    module: Optional[CompiledModule] = required_field()
+    def __call__(self, node: AbstractNode, *args: Any, **kwargs: Any) -> Any:
+        current = self.mecha.database.current
+        
+        file_type = cast(type[NamespaceFile], type(current))
 
-    defined_files = []
+        unit = self.mecha.database[current]
+        
+        if unit.resource_location:
+            definitions = self.index[file_type].get_definitions(unit.resource_location)
+
+            # This is a virtual file if it has no definitions
+            if len(definitions) == 0:
+                return node
+            
+            self.source_path = definitions[0][0]
+            self.resource_location = unit.resource_location
+            self.module = self.runtime.modules.get(current)
+        else:
+            return node
+
+
+        return super().__call__(node, *args, **kwargs)
+
 
     def type_analysis(self, node: AstNode):
         if self.has_type_annotation(node):
@@ -544,7 +622,7 @@ class BindingStep(Reducer):
             else:
                 self.set_type_annotation(node, base_type)
 
-        return arguments
+        return node
 
     @rule(AstTypeAnnotation)
     def annotation(self, node: AstTypeAnnotation):
@@ -703,23 +781,9 @@ class BindingStep(Reducer):
             metadata = retrieve_metadata(path, module.ast, VariableMetadata)
 
             if not metadata:
-                BindingStep(
-                    ctx=self.ctx,
-                    index=self.index,
-                    resource_location=path,
-                    source_path=str(Path(file.ensure_source_path()).absolute()),
-                    module=module,
-                    mecha=self.mecha,
-                    runtime=self.runtime,
-                    parser_to_file_type=self.parser_to_file_type
-                )(module.ast)
-
-                metadata = retrieve_metadata(path, module.ast, VariableMetadata)
-                if not metadata:
-                    logging.warning(f"Attempted to index file {path} but failed.")
-                    return UNKNOWN_TYPE
-
-            annotation = metadata.type_annotation
+                annotation = ReferencedTypeRepresentation.from_node(path, module.ast)
+            else:
+                annotation = metadata.type_annotation
 
             if annotation is not None and isinstance(annotation, ModuleRepresentation):
                 module = annotation
@@ -790,76 +854,6 @@ class BindingStep(Reducer):
             self.set_type_annotation(node, ModuleRepresentation(doc_string, members))
         return node
 
-    # @rule(AstCommand)
-    # def command(self, command: AstCommand):
-    #     if not (prototype := self.mecha.spec.prototypes.get(command.identifier)):
-    #         return command
-
-    #     nested_root_found = False
-
-    #     for i, argument in enumerate(command.arguments):
-
-    #         match argument:
-    #             case AstResourceLocation():
-
-    #                 # Attempt to get the parser for the argument
-    #                 argument_tree = prototype.get_argument(i)
-    #                 command_tree_node = self.mecha.spec.tree.get(argument_tree.scope)
-    #                 if not (command_tree_node and command_tree_node.parser):
-    #                     continue
-
-    #                 # If the parser is registered or the parent argument's name is registered
-    #                 # use that file type for its representation
-    #                 file_type = self.parser_to_file_type.get(
-    #                     command_tree_node.parser
-    #                 ) or self.index.resource_name_to_type.get(argument_tree.scope[-2])
-
-    #                 if file_type is None:
-    #                     continue
-
-    #                 # Ensure that unfinished paths are not added to the project index
-    #                 resolved_path = argument.get_canonical_value()
-
-    #                 # If the argument is a tag then we need to remove the leading
-    #                 # "#" and try to change the file type to the tag equivalent
-    #                 # ex. Function -> FunctionTag
-    #                 if argument.is_tag:
-    #                     resolved_path = resolved_path[1:]
-    #                     if not (
-    #                         file_type := self.index.resource_name_to_type.get(
-    #                             file_type.snake_name + "_tag"
-    #                         )
-    #                     ):
-    #                         continue
-
-    #                 add_representation(argument, file_type)
-
-    #                 if not valid_resource_location(resolved_path):
-    #                     continue
-
-    #                 # Check the command tree for the pattern:
-    #                 # resource_location, defintion
-    #                 # which is used by the nested resource plugin to define a new resource
-    #                 if (
-    #                     isinstance(command.arguments[-1], (AstRoot, AstJson))
-    #                     and not nested_root_found
-    #                 ):
-    #                     nested_root_found = True
-    #                     self.index[file_type].add_definition(
-    #                         resolved_path,
-    #                         self.source_path,
-    #                         (argument.location, argument.end_location),
-    #                     )
-    #                 # If the pattern isn't matched then just treat it as a reference
-    #                 # and not a definition of thre resource
-    #                 else:
-    #                     self.index[file_type].add_reference(
-    #                         resolved_path,
-    #                         self.source_path,
-    #                         (argument.location, argument.end_location),
-    #                     )
-
-    #     return command
 
     # @rule(AstBlock)
     # def block(self, block: AstBlock):
@@ -1040,83 +1034,20 @@ class BindingStep(Reducer):
 
 
 @dataclass
-class Indexer(MutatingReducer):
-    ctx: LanguageServerContext = required_field()
-    resource_location: str = required_field()
-    source_path: str = required_field()
-    file_instance: Function | Module = required_field()
+class AstFreezer(MutatingReducer):
+    mecha: Mecha = required_field()
+    _asts: dict[TextFileBase[Any], AstRoot] = extra_field(default_factory=dict)
 
-    output_ast: AstRoot = extra_field(
-        default=AstRoot(commands=AstChildren(children=[]))
-    )
+    def __call__(self, node: AbstractNode, *args: Any, **kwargs: Any) -> Any:
+        current = self.mecha.database.current
 
-    def __call__(self, ast: AstRoot, *args) -> AbstractNode:
-        project_index = self.ctx.inject(AegisProjectIndex)
+        if isinstance(node, AstRoot):
+            self._asts[current] = node
 
-        mecha = self.ctx.inject(Mecha)
-        runtime = self.ctx.inject(Runtime)
-        module = runtime.modules[self.file_instance]
-        # logging.debug(id(ast))
-        ast = module.ast if module is not None else ast
-        # logging.debug(id(ast))
-
-        # A file always defines itself
-        source_type = type(self.file_instance)
-
-        project_index[source_type].add_definition(
-            self.resource_location, self.source_path
-        )
-
-        # TODO: See if these steps can be merged into one
-
-        # Attaches the type annotations for assignments
-        initial_values = InitialStep(helpers=runtime.helpers)
-
-        # The binding step is responsible for attaching the majority of type annotations
-        bindings = BindingStep(
-            ctx=self.ctx,
-            index=project_index,
-            source_path=self.source_path,
-            resource_location=self.resource_location,
-            module=module,
-            runtime=self.ctx.inject(Runtime),
-            mecha=self.ctx.inject(Mecha),
-            # argument parser to resource type
-            parser_to_file_type={
-                "minecraft:advancement": Advancement,
-                "minecraft:function": Function,
-                "minecraft:predicate": Predicate,
-                "minecraft:loot_table": LootTable,
-            },
-        )
-
-        # This has to been done through extension because i'm too lazy to shadow or patch it
-        self.extend(
-            NestedLocationTransformer(
-                nested_location_resolver=NestedLocationResolver(ctx=self.ctx)
-            )
-        )
-
-        steps: list[Callable[[AstRoot], AstRoot]] = [
-            initial_values,
-            super().__call__,
-            bindings,
-        ]
-
-        clear_metadata(self.resource_location)
-
-        for step in steps:
-            try:
-                ast = step(ast)
-            except CompilationError as e:
-                tb = "\n".join(traceback.format_tb(e.__cause__.__traceback__))
-                logging.error(f"Error occured during {step}\n{e.__cause__}\n{tb}")
-                raise e.__cause__
-            except Exception as e:
-                tb = "\n".join(traceback.format_tb(e.__traceback__))
-                logging.error(f"Error occured during {step}\n{e}\n{tb}")
-
-        self.output_ast = ast
-
-        # Return a deepcopy so subsequent compilation steps don't modify the parsed state
-        return deepcopy(ast)
+        return deepcopy(node)
+    
+    def __getitem__(self, key: TextFileBase[Any]) -> AstRoot:
+        return self._asts[key]
+    
+    def __iter__(self):
+        return iter(self._asts.keys())

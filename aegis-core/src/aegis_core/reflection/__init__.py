@@ -246,6 +246,9 @@ def get_function_description(name: str, function: Any):
 
 
 def get_annotation_description(name: str, type_annotation: TypeRepresentation):
+    if not isinstance(type_annotation, TypeRepresentation):
+        print("???")
+
     return type_annotation.description(name)
 
     if get_origin(type_annotation) is type:

@@ -117,12 +117,7 @@ class InstanceRepresentation(TypeRepresentation):
     parent: TypeRepresentation = field()
 
     def description(self, variable_name: builtins.str) -> builtins.str:
-        return f"```py\n(variable) {variable_name}: {self.parent.pretty()}\n```" + (
-            "\n---\n" + self.parent.doc_string
-            if isinstance(self.parent, DocumentedTypeRepresentation)
-            and self.parent.doc_string
-            else ""
-        )
+        return f"```py\n(variable) {variable_name}: {self.parent.pretty()}\n```"
 
 
 @dataclass

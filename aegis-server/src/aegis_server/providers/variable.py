@@ -20,6 +20,8 @@ from aegis_core.reflection.type_representation import (
     ClassRepresentation,
     InstanceRepresentation,
     ReferencedTypeRepresentation,
+    TypeRepresentation,
+    UnionRepresentation,
 )
 import lsprotocol.types as lsp
 from bolt import (
@@ -53,65 +55,34 @@ def add_variable_definition(
     name: str,
     variable: Variable,
 ):
-    possible_types = set()
+    possible_types = []
 
     for binding in variable.bindings:
         origin = binding.origin
         if annotation := get_type_annotation(resource_location, origin):
-            possible_types.add(annotation)
+            if annotation not in possible_types:
+                possible_types.append(annotation)
 
-    if len(possible_types) > 0:
-        _type = reduce(lambda a, b: a | b, possible_types)
-        add_variable_completion(items, name, _type)
-
-
-def add_raw_definition(items: list[lsp.CompletionItem], name: str, value: Any):
-    if inspect.isclass(value) or isinstance(value, TypeInfo):
-        add_class_completion(items, name, value)
-    elif (
-        inspect.isfunction(value)
-        or inspect.isbuiltin(value)
-        or isinstance(value, FunctionInfo)
-    ):
-        add_function_completion(items, name, value)
+    annotation = UNKNOWN_TYPE
+    if len(possible_types) > 1:
+        annotation = UnionRepresentation(possible_types)
     else:
-        add_variable_completion(items, name, type(value))
+        annotation = possible_types[0]
 
+    add_completion_with_type(items, name, annotation)
 
-def add_class_completion(
-    items: list[lsp.CompletionItem], name: str, type_annotation: Any
+def add_completion_with_type(
+    items: list[lsp.CompletionItem], name: str, type_annotation: TypeRepresentation
 ):
-    description = get_annotation_description(name, type_annotation)
-    documentation = lsp.MarkupContent(lsp.MarkupKind.Markdown, description)
+    match type_annotation:
+        case ClassRepresentation():
+            kind = lsp.CompletionItemKind.Class
+        case CallableRepresentation():
+            kind = lsp.CompletionItemKind.Function
+        case _:
+            kind = lsp.CompletionItemKind.Variable if not name.isupper() else lsp.CompletionItemKind.Constant
 
-    items.append(
-        lsp.CompletionItem(
-            name, documentation=documentation, kind=lsp.CompletionItemKind.Class
-        )
-    )
-
-
-def add_function_completion(items: list[lsp.CompletionItem], name: str, function: Any):
-    description = get_annotation_description(name, function)
-    documentation = lsp.MarkupContent(lsp.MarkupKind.Markdown, description)
-
-    items.append(
-        lsp.CompletionItem(
-            name, documentation=documentation, kind=lsp.CompletionItemKind.Function
-        )
-    )
-
-
-def add_variable_completion(
-    items: list[lsp.CompletionItem], name: str, type_annotation: Any
-):
-    kind = (
-        lsp.CompletionItemKind.Property
-        if not name.isupper()
-        else lsp.CompletionItemKind.Constant
-    )
-
-    description = get_annotation_description(name, type_annotation)
+    description = type_annotation.description(name)
     documentation = lsp.MarkupContent(lsp.MarkupKind.Markdown, description)
 
     items.append(lsp.CompletionItem(name, documentation=documentation, kind=kind))
