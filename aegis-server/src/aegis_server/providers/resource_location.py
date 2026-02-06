@@ -47,7 +47,7 @@ class ResourceLocationFeatureProvider(BaseFeatureProvider[AstResourceLocation]):
         node = params.node
         text_range = params.text_range
 
-        metadata = retrieve_metadata(node, ResourceLocationMetadata)
+        metadata = retrieve_metadata(params.resource_location, node, ResourceLocationMetadata)
 
         if metadata is None or metadata.represents is None:
             path_type = None
@@ -71,7 +71,7 @@ class ResourceLocationFeatureProvider(BaseFeatureProvider[AstResourceLocation]):
         project_index = params.ctx.inject(AegisProjectIndex)
         node = params.node
 
-        metadata = retrieve_metadata(node, ResourceLocationMetadata)
+        metadata = retrieve_metadata(params.resource_location, node, ResourceLocationMetadata)
 
         if not metadata or not metadata.represents:
             return
@@ -97,7 +97,7 @@ class ResourceLocationFeatureProvider(BaseFeatureProvider[AstResourceLocation]):
         project_index = params.ctx.inject(AegisProjectIndex)
         node = params.node
 
-        metadata = retrieve_metadata(node, ResourceLocationMetadata)
+        metadata = retrieve_metadata(params.resource_location, node, ResourceLocationMetadata)
 
         if not metadata or not metadata.represents:
             return
@@ -118,7 +118,7 @@ class ResourceLocationFeatureProvider(BaseFeatureProvider[AstResourceLocation]):
         node = params.node
         project_index = params.ctx.inject(AegisProjectIndex)
 
-        metadata = retrieve_metadata(node, ResourceLocationMetadata)
+        metadata = retrieve_metadata(params.resource_location, node, ResourceLocationMetadata)
 
         if not metadata or not metadata.represents:
             return
