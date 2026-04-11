@@ -1,24 +1,14 @@
 import builtins
 import inspect
-import logging
 from typing import Any, Protocol, runtime_checkable
-import typing
 from ..ast.helpers import BaseMetadata, retrieve_metadata, _hash_node
-from beet.core.utils import extra_field
 from dataclasses import dataclass, field
 
-from bolt import (
-    AstExpression,
-    AstFunctionSignature,
-    AstFunctionSignatureArgument,
-    AstIdentifier,
-    AstTypeAnnotation,
-    AstValue,
-)
-from mecha import AstNode, Serializer
+
+from mecha import AstNode
 
 
-_reprs: dict[Any, TypeRepresentation] = dict()
+_reprs: dict[Any, "TypeRepresentation"] = dict()
 
 
 @dataclass
@@ -30,7 +20,7 @@ class TypeRepresentation:
         return "???"
 
     @staticmethod
-    def from_python(variable: Any) -> TypeRepresentation:
+    def from_python(variable: Any) -> "TypeRepresentation":
         if id(variable) in _reprs:
             return _reprs[id(variable)]
 
@@ -201,7 +191,7 @@ class ClassRepresentation(CallableRepresentation):
     methods: list[tuple[str, TypeRepresentation]] = field()
 
     generics: list[TypeRepresentation] = field()
-    bases: list[ClassRepresentation] = field(default_factory=list)
+    bases: list["ClassRepresentation"] = field(default_factory=list)
 
     @staticmethod
     def from_python(variable: Any):
