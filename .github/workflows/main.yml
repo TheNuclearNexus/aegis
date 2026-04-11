@@ -5,7 +5,6 @@ name: Node.js CI
 
 on:
   push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -57,6 +56,7 @@ jobs:
           name: extension
 
       - name: Semantic Release aegis-vscode
+        if: github.ref == 'refs/heads/main'
         run: cd ./aegis-vscode && npx semantic-release
         env:
           VSCE_PAT: ${{secrets.MARKETPLACE_TOKEN}}
@@ -71,4 +71,3 @@ jobs:
         with:
           path: "aegis-jetbrains/build/distributions/*.zip"
           name: jetbrains-plugin
-   
