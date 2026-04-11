@@ -105,7 +105,6 @@ from aegis_core.reflection import (
 )
 from aegis_core.reflection.type_representation import (
     ClassRepresentation,
-    BuiltinRepresentation,
     ModuleRepresentation,
     ReferencedTypeRepresentation,
     TypeRepresentation,

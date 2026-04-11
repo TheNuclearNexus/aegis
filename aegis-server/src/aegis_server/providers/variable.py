@@ -1,17 +1,11 @@
-from functools import reduce
-import inspect
 import logging
-from typing import Any, get_origin
+from typing import Any
 from aegis_core.ast.features.provider import BaseFeatureProvider, DefinitionParams
 from aegis_core.ast.helpers import node_location_to_range, offset_location, _hash_node
 from aegis_core.ast.metadata import VariableMetadata, attach_metadata, retrieve_metadata
 from aegis_core.reflection import (
     UNKNOWN_TYPE,
-    FunctionInfo,
-    TypeInfo,
     get_annotation_description,
-    get_function_description,
-    get_type_info,
     search_scope_for_binding,
 )
 from aegis_core.semantics import TokenModifier, TokenType
@@ -22,6 +16,7 @@ from aegis_core.reflection.type_representation import (
     ReferencedTypeRepresentation,
     TypeRepresentation,
     UnionRepresentation,
+    ModuleRepresentation,
 )
 import lsprotocol.types as lsp
 from bolt import (
@@ -30,11 +25,9 @@ from bolt import (
     AstImportedItem,
     AstTargetAttribute,
     AstTargetIdentifier,
-    Module,
-    Runtime,
     Variable,
 )
-from mecha import AstNode, Mecha
+from mecha import AstNode
 
 
 __all__ = ["VariableFeatureProvider"]
@@ -51,9 +44,9 @@ def get_type_annotation(resource_location: str, node: AstNode):
 
 def add_variable_definition(
     resource_location: str,
-    items: list[lsp.CompletionItem],
     name: str,
     variable: Variable,
+    items: dict[tuple[str, lsp.CompletionItemKind], lsp.MarkupContent],
 ):
     possible_types = []
 
@@ -67,65 +60,86 @@ def add_variable_definition(
     if len(possible_types) > 1:
         annotation = UnionRepresentation(possible_types)
     else:
-        annotation = possible_types[0]
+        annotation = possible_types[0] if len(possible_types) > 0 else UNKNOWN_TYPE
 
-    add_completion_with_type(items, name, annotation)
+    add_completion_with_type(name, annotation, items)
+
 
 def add_completion_with_type(
-    items: list[lsp.CompletionItem], name: str, type_annotation: TypeRepresentation
+    name: str,
+    type_annotation: TypeRepresentation,
+    items: dict[tuple[str, lsp.CompletionItemKind], lsp.MarkupContent],
 ):
     match type_annotation:
+        case ReferencedTypeRepresentation() as ref:
+            return add_completion_with_type(name, ref.get_reference(), items)
         case ClassRepresentation():
             kind = lsp.CompletionItemKind.Class
         case CallableRepresentation():
             kind = lsp.CompletionItemKind.Function
+        case ModuleRepresentation():
+            kind = lsp.CompletionItemKind.Module
         case _:
-            kind = lsp.CompletionItemKind.Variable if not name.isupper() else lsp.CompletionItemKind.Constant
+            kind = (
+                lsp.CompletionItemKind.Variable
+                if not name.isupper()
+                else lsp.CompletionItemKind.Constant
+            )
 
     description = type_annotation.description(name)
     documentation = lsp.MarkupContent(lsp.MarkupKind.Markdown, description)
 
-    items.append(lsp.CompletionItem(name, documentation=documentation, kind=kind))
+    items[(name, kind)] = documentation
 
 
-def get_bolt_completions(resource_location: str, node: AstNode):
+def get_root_completions(
+    type_annotation: TypeRepresentation,
+    items: dict[tuple[str, lsp.CompletionItemKind], lsp.MarkupContent],
+):
+    match type_annotation:
+        case UnionRepresentation(types):
+            for type in types:
+                get_root_completions(type, items)
+        case ReferencedTypeRepresentation() as ref:
+            get_root_completions(ref.get_reference(), items)
+        case InstanceRepresentation() as instance:
+            get_root_completions(instance.parent, items)
+        case ClassRepresentation() as cls:
+            for field in cls.fields:
+                add_completion_with_type(field[0], field[1], items)
+            for method in cls.methods:
+                add_completion_with_type(method[0], method[1], items)
+        case ModuleRepresentation() as mod:
+            for member in mod.members:
+                add_completion_with_type(member[0], member[1], items)
+        case _:
+            pass
+
+
+def get_bolt_completions(
+    resource_location: str, node: AstNode
+) -> list[lsp.CompletionItem]:
     if isinstance(node, AstAttribute):
         node = node.value
 
     metadata = retrieve_metadata(resource_location, node, VariableMetadata)
 
     if not metadata:
-        return
+        return []
 
     type_annotation = metadata.type_annotation
 
     if type_annotation is UNKNOWN_TYPE:
-        return
+        return []
 
-    # type_info = (
-    #     get_type_info(type_annotation)
-    #     if not isinstance(type_annotation, TypeInfo)
-    #     else type_annotation
-    # )
+    items = dict()
 
-    items = []
+    get_root_completions(type_annotation, items)
 
-    # for name, type in type_info.fields.items():
-    #     add_variable_completion(items, name, type)
-
-    # for name, function_info in type_info.functions.items():
-    #     items.append(
-    #         lsp.CompletionItem(
-    #             name,
-    #             kind=lsp.CompletionItemKind.Function,
-    #             documentation=lsp.MarkupContent(
-    #                 kind=lsp.MarkupKind.Markdown,
-    #                 value=get_function_description(name, function_info),
-    #             ),
-    #         )
-    #     )
-
-    return items
+    return [
+        lsp.CompletionItem(name, kind=kind, documentation=documentation)
+        for ((name, kind), documentation) in items.items()
+    ]
 
 
 def generic_variable_token(
@@ -212,7 +226,6 @@ class VariableFeatureProvider(
         )
 
         if metadata and metadata.type_annotation:
-
             type_annotation = metadata.type_annotation
 
             logging.debug(f"\n\n{id(type_annotation)}\n{_hash_node(node)}\n\n")

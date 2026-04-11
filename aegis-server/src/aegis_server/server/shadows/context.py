@@ -25,6 +25,8 @@ class LanguageServerContext(Context):
         default_factory=dict
     )
 
+    children: list["LanguageServerContext"] = extra_field(default_factory=list)
+
     def require(self, *args: PluginSpec):
         """Execute the specified plugin."""
         for arg in args:

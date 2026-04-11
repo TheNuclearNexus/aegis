@@ -1,6 +1,7 @@
+from collections.abc import Iterator
 import logging
 import os
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 
 from aegis_server.providers import register_providers
@@ -8,7 +9,9 @@ from beet import (
     LATEST_MINECRAFT_VERSION,
     Context,
     PluginSpec,
+    Project,
     ProjectBuilder,
+    ProjectConfig,
     TemplateManager,
 )
 from beet.contrib.load import load
@@ -25,6 +28,18 @@ __all__ = ["ProjectBuilderShadow"]
 
 
 class ProjectBuilderShadow(ProjectBuilder):
+    ls: LanguageServer
+
+    def __init__(
+        self,
+        ls: LanguageServer,
+        project: Project,
+        root: bool = False,
+        tmpdir: bool = False,
+    ):
+        self.ls = ls
+        super().__init__(project, root, tmpdir)
+
     def bootstrap(self, ctx: Context):
         """Plugin that handles the project configuration."""
 
@@ -40,7 +55,8 @@ class ProjectBuilderShadow(ProjectBuilder):
 
     # This stripped down version of build only handles loading the plugins from config
     # all other operations are gone such as linking
-    def initialize(self, ls: LanguageServer) -> LanguageServerContext:
+    @contextmanager
+    def build(self) -> Iterator[LanguageServerContext]:
         """Create the context, run the pipeline, and return the context."""
         with ExitStack() as stack:
             name = self.config.name or self.project.directory.stem
@@ -52,7 +68,7 @@ class ProjectBuilderShadow(ProjectBuilder):
             logging.debug("Creating context...")
             ctx = LanguageServerContext(
                 _pipeline=PipelineShadow,
-                ls=ls,
+                ls=self.ls,
                 project_config=self.config,
                 project_id=self.config.id or normalize_string(name),
                 project_name=name,
@@ -77,25 +93,34 @@ class ProjectBuilderShadow(ProjectBuilder):
                 whitelist=self.config.whitelist,
             )
 
-            pipelined_plugin: list[PluginSpec] = [self.bootstrap]
+            pipelined_plugins: list[PluginSpec] = [self.bootstrap]
 
             excluded_plugins = get_excluded_plugins(ctx)
             for item in self.config.pipeline:
-                if (
-                    item == "mecha"
-                    or not isinstance(item, str)
-                    or item in excluded_plugins
+                if isinstance(item, str) and (
+                    item == "mecha" or item in excluded_plugins
                 ):
                     continue
 
-                pipelined_plugin.append(item)
-
+                if isinstance(item, ProjectConfig):
+                    pipelined_plugins.append(
+                        ProjectBuilderShadow(
+                            self.ls,
+                            Project(
+                                resolved_cache=ctx.cache,
+                                resolved_config=item,
+                                resolved_worker_pool=self.project.worker_pool,
+                            ),
+                        )
+                    )
+                else:
+                    pipelined_plugins.append(item)
 
             logging.debug("Configuring Context")
             configure_ctx(ctx)
 
             with change_directory(tmpdir):
-                for plugin in pipelined_plugin:
+                for plugin in pipelined_plugins:
                     logging.debug(f"Running pipeline {plugin}")
                     ctx.require(plugin)
                 # pipeline = stack.enter_context(ctx.activate())
@@ -132,7 +157,13 @@ class ProjectBuilderShadow(ProjectBuilder):
                     except:
                         continue
 
-            return ctx
+            yield ctx
+
+    def __call__(self, ctx: Context):
+        """The builder instance is itself a plugin used for merging subpipelines."""
+        with self.build() as child_ctx:
+            if isinstance(ctx, LanguageServerContext):
+                ctx.children.append(child_ctx)
 
 
 def configure_ctx(ctx: LanguageServerContext):
