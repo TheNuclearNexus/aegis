@@ -89,8 +89,7 @@ def get_parent_context(ctx: LanguageServerContext, file_path: Path) -> LanguageS
             if not (isinstance(file, Function) or isinstance(file, Module)):
                 continue
 
-            mount_path = os.path.normpath(file.ensure_source_path())
-            mount_path = os.path.normcase(mount_path)
+            mount_path = Path(file.ensure_source_path())
             ctx.path_to_resource[mount_path] = (location, file)
             ctx.data[type(file)][location] = file
 
@@ -297,12 +296,12 @@ class AegisServer(LanguageServer):
     def context(
         self, document: TextDocument
     ) -> Generator[LanguageServerContext | None, None, None]:
-        doc_path = Path(document.path)
+        doc_path = Path(document.path).resolve()
 
         parents: list[Path] = []
 
         for parent_path in self._instances.keys():
-            if doc_path.is_relative_to(parent_path):
+            if doc_path.resolve().is_relative_to(parent_path):
                 parents.append(parent_path)
 
         if len(parents) == 0:

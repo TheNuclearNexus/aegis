@@ -1,3 +1,4 @@
+from pathlib import Path
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -8,6 +9,43 @@ from beet.core.utils import extra_field, local_import_path, required_field
 from pygls.server import LanguageServer
 
 __all__ = ["LanguageServerContext"]
+
+
+class PathToResource(dict[Path, tuple[str, NamespaceFile]]):
+    def __init__(self):
+        super().__init__()
+
+    def __getitem__(self, key: str | Path) -> tuple[str, NamespaceFile]:
+        if isinstance(key, str):
+            key = Path(key)
+
+        key = key.resolve()
+        return super().__getitem__(key)
+
+    def __setitem__(self, key: str | Path, value: tuple[str, NamespaceFile]) -> None:
+        if isinstance(key, str):
+            key = Path(key)
+
+        key = key.resolve()
+        super().__setitem__(key, value)
+
+    def get(
+        self, key: Path | str, default: tuple[str, NamespaceFile] | None = None
+    ) -> tuple[str, NamespaceFile] | None:
+        if isinstance(key, str):
+            key = Path(key)
+
+        key = key.resolve()
+        return super().get(key, default)
+
+    def setdefault(
+        self, key: str | Path, default: tuple[str, NamespaceFile]
+    ) -> tuple[str, NamespaceFile]:
+        if isinstance(key, str):
+            key = Path(key)
+
+        key = key.resolve()
+        return super().setdefault(key, default)
 
 
 # We use this shadow of context in order to route calls to `ctx`
@@ -21,9 +59,7 @@ class LanguageServerContext(Context):
 
     project_uuid: str = extra_field(default_factory=lambda: str(uuid.uuid1()))
 
-    path_to_resource: dict[str, tuple[str, NamespaceFile]] = extra_field(
-        default_factory=dict
-    )
+    path_to_resource: PathToResource = extra_field(default_factory=PathToResource)
 
     children: list["LanguageServerContext"] = extra_field(default_factory=list)
 

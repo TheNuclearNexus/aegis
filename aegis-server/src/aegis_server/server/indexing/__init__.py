@@ -200,7 +200,7 @@ class ProjectIndexer(Reducer):
     index: AegisProjectIndex = required_field()
     parser_to_file_type: dict[str, type[NamespaceFile]] = required_field()
 
-    source_path: str = field(init=False)
+    source_path: Path = field(init=False)
     resource_location: str = field(init=False)
     priority: int = field(init=False)
 
@@ -335,7 +335,7 @@ class TypeAnnotationResolver(Reducer):
     runtime: Runtime = required_field()
     mecha: Mecha = required_field()
 
-    source_path: str = field(init=False)
+    source_path: Path = field(init=False)
     resource_location: str = field(init=False)
     module: Optional[CompiledModule] = field(init=False)
 

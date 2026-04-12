@@ -1,8 +1,8 @@
 from collections.abc import Iterator
 import logging
-import os
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
+from pathlib import Path
 
 from aegis_server.providers import register_providers
 from beet import (
@@ -150,9 +150,8 @@ class ProjectBuilderShadow(ProjectBuilder):
                 # Build a map of file path to resource location
                 for location, file in pack.all():
                     try:
-                        path = os.path.normpath(file.ensure_source_path())
-                        path = os.path.normcase(path)
-                        ctx.path_to_resource[str(path)] = (location, file)
+                        path = Path(file.ensure_source_path())
+                        ctx.path_to_resource[path] = (location, file)
                         project_index[type(file)].add_definition(location, path)
                     except:
                         continue

@@ -63,9 +63,7 @@ async def get_compilation_data(ctx: LanguageServerContext, text_doc: TextDocumen
     await COMPILATION_LOCK.acquire()
     COMPILATION_LOCK.release()
 
-    resource = ctx.path_to_resource.get(
-        os.path.normcase(os.path.normpath(text_doc.path))
-    )
+    resource = ctx.path_to_resource.get(Path(text_doc.path))
 
     if resource and resource[0] in COMPILATION_RESULTS:
         return COMPILATION_RESULTS[resource[0]]
@@ -101,41 +99,40 @@ async def validate_function(
     ctx: LanguageServerContext, text_doc: TextDocument
 ) -> list[CompilationError]:
 
-    path = os.path.normcase(os.path.normpath(text_doc.path))
+    path = Path(text_doc.path)
     logging.debug(f"Queuing compilation of `{path}`")
-    async with semaphore(COMPILATION_LOCK):
-        logging.debug(f"Starting compilation of `{path}`")
+    # async with semaphore(COMPILATION_LOCK):
+    logging.debug(f"Starting compilation of `{path}`")
 
-        location, file = ctx.path_to_resource[path]
+    location, file = ctx.path_to_resource[path]
 
-        if not isinstance(file, Function) and not isinstance(file, Module):
-            COMPILATION_RESULTS[location] = CompiledDocument(
-                ctx, location, None, [], None, None
-            )
-            logging.debug("File is not a function or module.")
-            return []
+    if not isinstance(file, Function) and not isinstance(file, Module):
+        COMPILATION_RESULTS[location] = CompiledDocument(
+            ctx, location, None, [], None, None
+        )
+        logging.debug("File is not a function or module.")
+        return []
 
-        try:
-            compiled_doc = await parse_function(
-                ctx,
-                location,
-                text_doc.path,
-                type(file)(text_doc.source, text_doc.path),
-            )
+    try:
+        compiled_doc = await parse_function(
+            ctx,
+            location,
+            path,
+            type(file)(text_doc.source, text_doc.path),
+        )
 
-            COMPILATION_RESULTS[location] = compiled_doc
-            res = compiled_doc.diagnostics
+        COMPILATION_RESULTS[location] = compiled_doc
+        res = compiled_doc.diagnostics
 
-        except TimeoutError as ex:
-            message = (
-                f"Compilation took longer than {TIMEOUT_DURATION} seconds, aborting"
-            )
-            logging.debug(f"{message}\n{ex}")
-            ctx.ls.show_message(message, lsp.MessageType.Error)
-            res = []
+    except TimeoutError as ex:
+        message = (
+            f"Compilation took longer than {TIMEOUT_DURATION} seconds, aborting"
+        )
+        logging.debug(f"{message}\n{ex}")
+        ctx.ls.show_message(message, lsp.MessageType.Error)
+        res = []
 
     return res
-
 
 
 @dataclass
@@ -167,7 +164,7 @@ Node = TypeVar("Node", bound=AbstractNode)
 async def parse_function(
     ctx: LanguageServerContext,
     resource_location: str,
-    source_path: str,
+    source_path: Path,
     file_instance: Function | Module,
 ) -> CompiledDocument:
     mecha = ctx.inject(Mecha)
@@ -223,7 +220,7 @@ def use_steps(mecha: Mecha, steps):
 def compile(
     ctx: LanguageServerContext,
     resource_location: str,
-    source_path: str,
+    source_path: Path,
     source_file: Function | Module,
 ) -> dict[TextFileBase[Any], tuple[AstNode, list[InvalidSyntax | Diagnostic]]]:
     mecha = ctx.inject(Mecha)

@@ -18,8 +18,8 @@ def tokenstream_error_to_lsp_diag(
 
     trace = "\n".join(traceback.format_tb(exec.__traceback__))
 
-    message = f"{exec.format_message() if isinstance(exec, Diagnostic) else exec.format(filename or 'unknown')}\n{type(exec).__name__}\n{trace}"
-    logging.error(message)
+    message = f"{exec.format_message() if isinstance(exec, Diagnostic) else exec.format(filename or 'unknown')}\n{type(exec).__name__}"
+    logging.error(message + f"\n{trace}")
     return lsp.Diagnostic(
         range=lsp.Range(
             start=lsp.Position(
