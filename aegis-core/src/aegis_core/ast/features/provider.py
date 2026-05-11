@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
+from bolt import CompiledModule
 import lsprotocol.types as lsp
 from beet import Context
-from mecha import AstNode
+from mecha import AstNode, CompilationUnit
 
 from ...semantics import TokenModifier, TokenType
 
@@ -16,10 +17,17 @@ __all__ = [
     "ReferencesParams",
     "RenameParams",
     "SemanticsParams",
+    "SemanticToken"
 ]
 
 Node = TypeVar("Node", bound=AstNode)
 
+SemanticToken = tuple[AstNode, TokenType, list[TokenModifier]]
+
+@dataclass
+class CompilationInformation:
+    unit: CompilationUnit|None
+    module: CompiledModule|None
 
 @dataclass
 class BaseParams(Generic[Node]):
@@ -38,7 +46,9 @@ class HoverParams(BaseParams[Node]):
 
 
 @dataclass
-class DefinitionParams(BaseParams[Node]): ...
+class DefinitionParams(BaseParams[Node]):
+    text_document_uri: str
+    compilation: CompilationInformation
 
 
 @dataclass
@@ -82,5 +92,5 @@ class BaseFeatureProvider(Generic[Node]):
     @classmethod
     def semantics(
         cls, params: SemanticsParams[Node]
-    ) -> list[tuple[AstNode, TokenType, list[TokenModifier]]] | None:
+    ) -> list[SemanticToken] | None:
         return None

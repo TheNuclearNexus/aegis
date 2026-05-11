@@ -1,7 +1,9 @@
 import builtins
-import logging
 
-from aegis_server.providers.variable import add_raw_definition, add_variable_definition
+from aegis_server.providers.variable import (
+    add_completion_with_type,
+    add_variable_definition,
+)
 from bolt import Runtime, UnboundLocalIdentifier, UndefinedIdentifier
 from lsprotocol import types as lsp
 from mecha import (
@@ -12,6 +14,7 @@ from mecha import (
 from pygls.workspace import TextDocument
 from tokenstream import UnexpectedEOF, UnexpectedToken
 
+from aegis_core.reflection.type_representation import TypeRepresentation
 from aegis_core.ast.features import AegisFeatureProviders
 from aegis_core.ast.features.provider import CompletionParams
 from aegis_server.server.features.helpers import get_node_at_position
@@ -53,7 +56,7 @@ def get_token_options(mecha: Mecha, token_type: str, value: str | None):
     if token_type in TOKEN_HINTS:
         return [lsp.CompletionItem(k) for k in TOKEN_HINTS[token_type]]
 
-    if value == None:
+    if value is None:
         if token_type not in mecha.spec.parsers:
             return []
 
@@ -102,7 +105,9 @@ async def get_completions(
     diagnostics = compiled_doc.diagnostics
 
     if len(diagnostics) > 0:
-        return get_diag_completions(pos, mecha, ctx.inject(Runtime), diagnostics)
+        return get_diag_completions(
+            compiled_doc.resource_location, pos, mecha, ctx.inject(Runtime), diagnostics
+        )
     elif ast is not None:
         node = get_node_at_position(ast, pos)
 
@@ -113,12 +118,13 @@ async def get_completions(
 
 
 def get_diag_completions(
+    resource_location: str,
     pos: lsp.Position,
     mecha: Mecha,
     runtime: Runtime,
     diagnostics: list[CompilationError],
 ):
-    items = []
+    completions = []
     for diagnostic in diagnostics:
         start = diagnostic.location
         end = diagnostic.end_location
@@ -133,20 +139,30 @@ def get_diag_completions(
                 [token_type, value] = (
                     pattern if isinstance(pattern, tuple) else [pattern, None]
                 )
-                items += get_token_options(mecha, token_type, value)
-            
+                completions += get_token_options(mecha, token_type, value)
+
         if isinstance(diagnostic, UnboundLocalIdentifier):
-            for name in mecha.spec.tree.children.keys(): #type: ignore
-                items.append(lsp.CompletionItem(name, kind = lsp.CompletionItemKind.Keyword))
+            for name in mecha.spec.tree.children.keys():  # type: ignore
+                completions.append(
+                    lsp.CompletionItem(name, kind=lsp.CompletionItemKind.Keyword)
+                )
 
         if isinstance(diagnostic, UndefinedIdentifier):
+            items = dict()
             for name, variable in diagnostic.lexical_scope.variables.items():
-                add_variable_definition(items, name, variable)
+                add_variable_definition(resource_location, name, variable, items)
 
             for name, value in runtime.globals.items():
-                add_raw_definition(items, name, value)
+                annotation = TypeRepresentation.from_python(value)
+                add_completion_with_type(name, annotation, items)
 
             for name in runtime.builtins:
-                add_raw_definition(items, name, getattr(builtins, name))
+                annotation = TypeRepresentation.from_python(getattr(builtins, name))
+                add_completion_with_type(name, annotation, items)
+            
+            completions.extend([
+                lsp.CompletionItem(name, kind=kind, documentation=documentation)
+                for ((name, kind), documentation) in items.items()
+            ])
 
-    return lsp.CompletionList(False, items)
+    return lsp.CompletionList(False, completions)
