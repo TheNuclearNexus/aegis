@@ -1,5 +1,4 @@
 import asyncio
-import importlib
 import json
 import logging
 import os
@@ -17,8 +16,8 @@ from urllib.request import url2pathname
 
 from beet import (
     Context,
+    DataPack,
     Function,
-    NamespaceFile,
     PluginError,
     PluginImportError,
     Project,
@@ -26,10 +25,11 @@ from beet import (
     load_config,
     locate_config,
 )
+from beet.core.utils import change_directory
 from beet.library.base import LATEST_MINECRAFT_VERSION
 from bolt import Module
 from lsprotocol import types as lsp
-from mecha import DiagnosticErrorSummary, Mecha
+from mecha import DiagnosticErrorSummary
 from pygls.server import LanguageServer
 from pygls.workspace import TextDocument
 
@@ -47,7 +47,59 @@ logging.basicConfig(
     format="%(levelname)s:%(filename)s:%(lineno)d:\t%(message)s",
 )
 
-CONFIG_TYPES = ["beet.json", "beet.yaml", "beet.yml"]
+SUPPORTED_EXTENSIONS = [Function.extension, Module.extension]
+
+def get_parent_context(ctx: LanguageServerContext, file_path: Path) -> LanguageServerContext | None:
+    """Try to mount a given file path to the context. True if the file was successfully mounted"""
+
+    if file_path.suffix not in SUPPORTED_EXTENSIONS:
+        return None
+    
+    if file_path in ctx.path_to_resource:
+        return ctx
+    
+    for child in ctx.children:
+        if parent := get_parent_context(child, file_path):
+            return parent
+
+    load_options = ctx.project_config.data_pack.load
+    prefix = None
+    for entry in load_options.entries():
+        if isinstance(entry, dict):
+            for key, paths in entry.items():
+                for mount_path in paths.entries():
+                    if file_path.is_relative_to(mount_path):
+                        relative = file_path.relative_to(mount_path)
+                        prefix = str(key / relative)
+                        break
+
+        elif file_path.is_relative_to(entry):
+            relative = file_path.relative_to(entry)
+            prefix = str(relative)
+
+    if prefix is None:
+        return None
+
+    try:
+        # Mounting is done into a temp datapack to make it easier to get the file path
+        # The other option which may be better is to monkey patch mount directly
+        temp = DataPack()
+        temp.mount(prefix, file_path)
+        for [location, file] in temp.all():
+            if not (isinstance(file, Function) or isinstance(file, Module)):
+                continue
+
+            mount_path = Path(file.ensure_source_path())
+            ctx.path_to_resource[mount_path] = (location, file)
+            ctx.data[type(file)][location] = file
+
+            logging.debug(f"Mounted {file_path} to {location}")
+        return ctx
+    except Exception as exc:
+        logging.error(f"Failed to mount {file_path}, reloading datapack,\n{exc}")
+
+    return None
+
 
 
 class AegisServer(LanguageServer):
@@ -157,50 +209,42 @@ class AegisServer(LanguageServer):
         """Attempt to configure the project's context and run necessary plugins"""
         project = Project(config, None, config_path)
 
-        ctx = ProjectBuilderShadow(project, root=True).initialize(self)
-        # logging.debug(f"Mecha created for {config_path} successfully")
-        return ctx
+        with ProjectBuilderShadow(self, project, root=True).build() as ctx:
+            return ctx
 
-    def create_instance(self, config_path: Path) -> LanguageServerContext | None:
-        config = load_config(config_path)
-        # logging.debug(config)
+    def create_instance(
+        self, config: ProjectConfig, config_path: Path
+    ) -> LanguageServerContext | None:
         # Ensure that we aren't loading in all project files
         config.output = None
 
-        config.pipeline = list(filter(lambda p: isinstance(p, str), config.pipeline))
-
-        og_cwd = os.getcwd()
         og_sys_path = sys.path
         og_modules = sys.modules
 
         sys.path = [*self._sites, str(config_path.parent), *og_sys_path]
 
-        # logging.debug(sys.path)
+        with change_directory(config_path.parent):
+            instance = None
 
-        os.chdir(config_path.parent)
-
-        instance = None
-
-        try:
-            instance = self.create_context(config, config_path)
-        except PluginImportError as plugin_error:
-            logging.error(
-                f"Plugin Import Error: {plugin_error}\n{plugin_error.__cause__}"
-            )
-        except PluginError as plugin_error:
-            logging.error(plugin_error.__cause__)
-            raise plugin_error.__cause__
-        except DiagnosticErrorSummary as summary:
-            logging.error("Errors found in the following:")
-            for diag in summary.diagnostics.exceptions:
+            try:
+                instance = self.create_context(config, config_path)
+            except PluginImportError as plugin_error:
                 logging.error(
-                    "\t" + str(diag.file.source_path if diag.file is not None else "")
+                    f"Plugin Import Error: {plugin_error}\n{plugin_error.__cause__}"
                 )
+            except PluginError as plugin_error:
+                logging.error(plugin_error.__cause__)
+                raise plugin_error.__cause__
+            except DiagnosticErrorSummary as summary:
+                logging.error("Errors found in the following:")
+                for diag in summary.diagnostics.exceptions:
+                    logging.error(
+                        "\t" + str(diag.file.source_path if diag.file is not None else "")
+                    )
 
-        except Exception as e:
-            logging.error(f"Error occured while running beet: {type(e)} {e}")
+            except Exception as e:
+                logging.error(f"Error occured while running beet: {type(e)} {e}")
 
-        os.chdir(og_cwd)
         sys.path = og_sys_path
         sys.modules = og_modules
 
@@ -215,12 +259,13 @@ class AegisServer(LanguageServer):
         for w in self.workspace.folders.values():
             ws_path = self.uri_to_path(w.uri)
 
-            if config_path := locate_config(ws_path):
-                config_paths.append(config_path)
+            if path := locate_config(ws_path):
+                config_paths.append(path)
 
         for config_path in config_paths:
             try:
-                if config := self.create_instance(config_path):
+                config = load_config(config_path)
+                if config := self.create_instance(config, config_path):
                     self._instances[config_path.parent] = (Lock(), config)
             except Exception as exc:
                 logging.error(
@@ -239,7 +284,8 @@ class AegisServer(LanguageServer):
 
     def get_instance(self, config_path: Path):
         if config_path not in self._instances or self._instances[config_path] is None:
-            instance = self.create_instance(config_path)
+            config = load_config(config_path)
+            instance = self.create_instance(config, config_path)
 
             if instance is not None:
                 self._instances[config_path] = (Lock(), instance)
@@ -250,20 +296,25 @@ class AegisServer(LanguageServer):
     def context(
         self, document: TextDocument
     ) -> Generator[LanguageServerContext | None, None, None]:
-        doc_path = Path(document.path)
+        doc_path = Path(document.path).resolve()
 
         parents: list[Path] = []
 
         for parent_path in self._instances.keys():
-            if doc_path.is_relative_to(parent_path):
+            if doc_path.resolve().is_relative_to(parent_path):
                 parents.append(parent_path)
 
-        if len(parents) <= 0:
+        if len(parents) == 0:
             yield None
-
-        parents = sorted(parents, key=lambda p: len(str(p).split(os.path.sep)))
+            return
 
         (lock, context) = self.get_instance(parents[-1])
+
+        context = get_parent_context(context, doc_path)
+
+        if context is None:
+            yield None
+            return
 
         lock.acquire()
         yield context

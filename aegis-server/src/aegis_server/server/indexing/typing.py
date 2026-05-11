@@ -42,4 +42,4 @@ class ClassRepresentation(TypeRepresentation):
     methods: list[tuple[str, TypeRepresentation]] = field()
     doc_string: str | None = extra_field()
 
-    sub_classes: list[ClassRepresentation] = field(default_factory=list)
+    sub_classes: list["ClassRepresentation"] = field(default_factory=list)

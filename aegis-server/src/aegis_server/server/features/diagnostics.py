@@ -3,7 +3,6 @@ import traceback
 
 import lsprotocol.types as lsp
 from mecha import Diagnostic
-from tokenstream import InvalidSyntax, UnexpectedToken
 
 from .. import AegisServer
 from ..shadows.compile_document import CompilationError
@@ -18,10 +17,9 @@ def tokenstream_error_to_lsp_diag(
     #     range = [exec.token.location, exec.token.end_location]
 
     trace = "\n".join(traceback.format_tb(exec.__traceback__))
-    # logging.debug(trace)
 
     message = f"{exec.format_message() if isinstance(exec, Diagnostic) else exec.format(filename or 'unknown')}\n{type(exec).__name__}"
-    logging.error(message)
+    logging.error(message + f"\n{trace}")
     return lsp.Diagnostic(
         range=lsp.Range(
             start=lsp.Position(

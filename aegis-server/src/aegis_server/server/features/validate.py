@@ -1,25 +1,18 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import logging
-import multiprocessing
 import os
-import signal
 import time
 import traceback
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from functools import partial
-from pathlib import Path, PurePath
+from pathlib import Path
 from typing import Any, TypeVar
 
 from beet import (
     Advancement,
-    Context,
-    DataPack,
     Function,
     LootTable,
-    NamespaceFile,
-    PackageablePath,
     Predicate,
     TextFileBase,
 )
@@ -27,7 +20,6 @@ from beet.core.utils import extra_field, required_field
 from bolt import Module, Runtime
 from mecha import (
     AbstractNode,
-    AstChildren,
     AstNode,
     AstRoot,
 )
@@ -36,11 +28,9 @@ from mecha import (
     CompilationUnit,
     Diagnostic,
     DiagnosticCollection,
-    Dispatcher,
     Mecha,
     MutatingReducer,
     rule,
-    dispatch,
 )
 from mecha.ast import AstError
 from mecha.contrib.nested_location import (
@@ -66,7 +56,6 @@ from ..shadows.context import LanguageServerContext
 
 TIMEOUT_DURATION = 30
 
-SUPPORTED_EXTENSIONS = [Function.extension, Module.extension]
 T = TypeVar("T", bound=AstNode)
 
 
@@ -74,9 +63,7 @@ async def get_compilation_data(ctx: LanguageServerContext, text_doc: TextDocumen
     await COMPILATION_LOCK.acquire()
     COMPILATION_LOCK.release()
 
-    resource = ctx.path_to_resource.get(
-        os.path.normcase(os.path.normpath(text_doc.path))
-    )
+    resource = ctx.path_to_resource.get(Path(text_doc.path))
 
     if resource and resource[0] in COMPILATION_RESULTS:
         return COMPILATION_RESULTS[resource[0]]
@@ -112,98 +99,40 @@ async def validate_function(
     ctx: LanguageServerContext, text_doc: TextDocument
 ) -> list[CompilationError]:
 
-    path = os.path.normcase(os.path.normpath(text_doc.path))
+    path = Path(text_doc.path)
     logging.debug(f"Queuing compilation of `{path}`")
-    async with semaphore(COMPILATION_LOCK):
+    # async with semaphore(COMPILATION_LOCK):
+    logging.debug(f"Starting compilation of `{path}`")
 
-        logging.debug(f"Starting compilation of `{path}`")
+    location, file = ctx.path_to_resource[path]
 
-        if path not in ctx.path_to_resource:
-            if not try_to_mount_file(ctx, path):
-                logging.debug("File not in workspaces")
-                return []
-
-        location, file = ctx.path_to_resource[path]
-
-        if not isinstance(file, Function) and not isinstance(file, Module):
-            COMPILATION_RESULTS[location] = CompiledDocument(
-                ctx, location, None, [], None, None
-            )
-            logging.debug("File is not a function or module.")
-            return []
-
-        try:
-            compiled_doc = await parse_function(
-                ctx,
-                location,
-                text_doc.path,
-                type(file)(text_doc.source, text_doc.path),
-            )
-
-            COMPILATION_RESULTS[location] = compiled_doc
-            res = compiled_doc.diagnostics
-
-        except TimeoutError as ex:
-            message = (
-                f"Compilation took longer than {TIMEOUT_DURATION} seconds, aborting"
-            )
-            logging.debug(f"{message}\n{ex}")
-            ctx.ls.show_message(message, lsp.MessageType.Error)
-            res = []
-
-    return res
-
-
-def try_to_mount_file(ctx: LanguageServerContext, file_path: str):
-    """Try to mount a given file path to the context. True if the file was successfully mounted"""
-
-    _, file_extension = os.path.splitext(file_path)
-    if not file_extension in SUPPORTED_EXTENSIONS:
-        return False
-
-    load_options = ctx.project_config.data_pack.load
-    prefix = None
-    for entry in load_options.entries():
-        # File can't be relative to a url
-        if isinstance(entry, PackageablePath):
-            continue
-
-        if isinstance(entry, dict):
-            for key, paths in entry.items():
-                for path in paths.entries():
-                    # File can't be relative to a url
-                    if isinstance(path, PackageablePath):
-                        continue
-
-                    if PurePath(file_path).is_relative_to(path):
-                        relative = PurePath(file_path).relative_to(path)
-                        prefix = str(key / relative)
-                        break
-        elif PurePath(file_path).is_relative_to(entry):
-            relative = PurePath(file_path).relative_to(entry)
-            prefix = str(relative)
-
-    if prefix == None:
-        return False
+    if not isinstance(file, Function) and not isinstance(file, Module):
+        COMPILATION_RESULTS[location] = CompiledDocument(
+            ctx, location, None, [], None, None
+        )
+        logging.debug("File is not a function or module.")
+        return []
 
     try:
-        temp = DataPack()
-        temp.mount(prefix, file_path)
-        for [location, file] in temp.all():
-            if not (isinstance(file, Function) or isinstance(file, Module)):
-                continue
+        compiled_doc = await parse_function(
+            ctx,
+            location,
+            path,
+            type(file)(text_doc.source, text_doc.path),
+        )
 
-            path = os.path.normpath(file.ensure_source_path())
-            path = os.path.normcase(path)
-            ctx.path_to_resource[path] = (location, file)
-            ctx.data[type(file)][location] = file
+        COMPILATION_RESULTS[location] = compiled_doc
+        res = compiled_doc.diagnostics
 
-        logging.debug(f"Mounted {file_path} to {location}")
-        return True
-    except Exception as exc:
-        logging.error(f"Failed to mount {file_path}, reloading datapack,\n{exc}")
+    except TimeoutError as ex:
+        message = (
+            f"Compilation took longer than {TIMEOUT_DURATION} seconds, aborting"
+        )
+        logging.debug(f"{message}\n{ex}")
+        ctx.ls.show_message(message, lsp.MessageType.Error)
+        res = []
 
-    return False
+    return res
 
 
 @dataclass
@@ -235,7 +164,7 @@ Node = TypeVar("Node", bound=AbstractNode)
 async def parse_function(
     ctx: LanguageServerContext,
     resource_location: str,
-    source_path: str,
+    source_path: Path,
     file_instance: Function | Module,
 ) -> CompiledDocument:
     mecha = ctx.inject(Mecha)
@@ -266,7 +195,6 @@ async def parse_function(
     # # Parse the stream
     compilation_unit = mecha.database[file_instance]
     compiled_module = runtime.modules.registry.get(file_instance)
-    logging.debug(compiled_module.lexical_scope if compiled_module else "")
 
     return CompiledDocument(
         resource_location=resource_location,
@@ -281,16 +209,18 @@ async def parse_function(
 
 @contextmanager
 def use_steps(mecha: Mecha, steps):
-    initial_steps = mecha.steps
-    mecha.steps = steps
+    initial_steps = mecha.steps.copy()
+    mecha.steps.clear()
+    mecha.steps.extend(steps)
     yield
-    mecha.steps = initial_steps
+    mecha.steps.clear()
+    mecha.steps.extend(initial_steps)
 
 
 def compile(
     ctx: LanguageServerContext,
     resource_location: str,
-    source_path: str,
+    source_path: Path,
     source_file: Function | Module,
 ) -> dict[TextFileBase[Any], tuple[AstNode, list[InvalidSyntax | Diagnostic]]]:
     mecha = ctx.inject(Mecha)
@@ -350,7 +280,6 @@ def compile(
             mecha.transform,
         ],
     ):
-
         # Configure the database to compile the file
         compiled_unit = CompilationUnit(
             resource_location=resource_location, pack=ctx.data
@@ -361,12 +290,16 @@ def compile(
 
         for step, file_instance in database.process_queue():
             compilation_unit = mecha.database.get(file_instance)
-            
+
             if not compilation_unit:
-                logging.debug(f"--- Step {step} could not find a compilation unit for {file_instance} ---")
+                logging.debug(
+                    f"--- Step {step} could not find a compilation unit for {file_instance} ---"
+                )
                 continue
 
-            logging.debug(f"--- Step {step} for {compilation_unit.filename} @ {compilation_unit.priority} ---")
+            logging.debug(
+                f"--- Step {step} for {compilation_unit.filename} @ {compilation_unit.priority} ---"
+            )
             start = time.time()
 
             if step < 0:
@@ -383,7 +316,10 @@ def compile(
                     )
 
                     ast = mecha.parse_stream(
-                        mecha.spec.multiline, None, AstRoot.parser, stream  # type: ignore
+                        mecha.spec.multiline,
+                        None,
+                        AstRoot.parser or "root",
+                        stream,  # type: ignore
                     )
 
                     ast, errors = ErrorAccumulator(
@@ -448,7 +384,9 @@ def compile(
 
             logging.debug(f"Execution took {time.time() - start}s")
 
-    results: dict[TextFileBase[Any], tuple[AstNode, list[InvalidSyntax | Diagnostic]]] = dict()
+    results: dict[
+        TextFileBase[Any], tuple[AstNode, list[InvalidSyntax | Diagnostic]]
+    ] = dict()
     for file in frozen_asts:
         results[file] = (
             frozen_asts[file],

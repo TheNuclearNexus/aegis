@@ -1,5 +1,4 @@
 import builtins
-import logging
 
 from aegis_server.providers.variable import (
     add_completion_with_type,
@@ -57,7 +56,7 @@ def get_token_options(mecha: Mecha, token_type: str, value: str | None):
     if token_type in TOKEN_HINTS:
         return [lsp.CompletionItem(k) for k in TOKEN_HINTS[token_type]]
 
-    if value == None:
+    if value is None:
         if token_type not in mecha.spec.parsers:
             return []
 
@@ -125,7 +124,7 @@ def get_diag_completions(
     runtime: Runtime,
     diagnostics: list[CompilationError],
 ):
-    items = []
+    completions = []
     for diagnostic in diagnostics:
         start = diagnostic.location
         end = diagnostic.end_location
@@ -140,24 +139,30 @@ def get_diag_completions(
                 [token_type, value] = (
                     pattern if isinstance(pattern, tuple) else [pattern, None]
                 )
-                items += get_token_options(mecha, token_type, value)
+                completions += get_token_options(mecha, token_type, value)
 
         if isinstance(diagnostic, UnboundLocalIdentifier):
             for name in mecha.spec.tree.children.keys():  # type: ignore
-                items.append(
+                completions.append(
                     lsp.CompletionItem(name, kind=lsp.CompletionItemKind.Keyword)
                 )
 
         if isinstance(diagnostic, UndefinedIdentifier):
+            items = dict()
             for name, variable in diagnostic.lexical_scope.variables.items():
-                add_variable_definition(resource_location, items, name, variable)
+                add_variable_definition(resource_location, name, variable, items)
 
             for name, value in runtime.globals.items():
                 annotation = TypeRepresentation.from_python(value)
-                add_completion_with_type(items, name, annotation)
+                add_completion_with_type(name, annotation, items)
 
             for name in runtime.builtins:
                 annotation = TypeRepresentation.from_python(getattr(builtins, name))
-                add_completion_with_type(items, name, annotation)
+                add_completion_with_type(name, annotation, items)
+            
+            completions.extend([
+                lsp.CompletionItem(name, kind=kind, documentation=documentation)
+                for ((name, kind), documentation) in items.items()
+            ])
 
-    return lsp.CompletionList(False, items)
+    return lsp.CompletionList(False, completions)

@@ -1,14 +1,11 @@
 from heapq import heapify
-import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import ClassVar
 
-from beet import Context, File, Function, NamespaceFile
-from beet.core.utils import extra_field, required_field
+from beet import Context, File, NamespaceFile
+from beet.core.utils import extra_field
 
 from mecha import Mecha
 from tokenstream import SourceLocation
@@ -20,8 +17,8 @@ FilePointer = tuple[SourceLocation, SourceLocation]
 
 @dataclass
 class ResourceIndice:
-    definitions: dict[str, set[FilePointer]] = extra_field(default_factory=dict)
-    references: dict[str, set[FilePointer]] = extra_field(default_factory=dict)
+    definitions: dict[Path, set[FilePointer]] = extra_field(default_factory=dict)
+    references: dict[Path, set[FilePointer]] = extra_field(default_factory=dict)
 
     def _dump(self) -> str:
         dump = ""
@@ -42,20 +39,20 @@ def valid_resource_location(path: str):
     return bool(re.match(r"^[a-z0-9_\.]+:[a-z0-9_\.]+(\/?[a-z0-9_\.]+)*$", path))
 
 def normalize_path(path: str):
-    return os.path.normcase(os.path.normpath(path))
+    return Path(path).resolve()
 
 @dataclass
 class ResourceIndex:
     _files: dict[str, ResourceIndice] = extra_field(default_factory=dict)
     _lock: Lock = extra_field(default_factory=Lock)
 
-    def remove_associated(self, path: str | File) -> list[str]:
+    def remove_associated(self, path: Path | File) -> list[str]:
         self._lock.acquire()
 
         if isinstance(path, File):
-            path = str(Path(path.ensure_source_path()).absolute())
+            path = Path(path.ensure_source_path())
 
-        path = normalize_path(path)
+        path = path.resolve()
 
         removed = []
 
@@ -76,7 +73,7 @@ class ResourceIndex:
     def add_definition(
         self,
         resource_location: str,
-        source_path: str,
+        source_path: Path,
         source_location: FilePointer = (
             SourceLocation(0, 0, 0),
             SourceLocation(0, 0, 0),
@@ -85,7 +82,7 @@ class ResourceIndex:
         if not valid_resource_location(resource_location):
             raise Exception(f"Invalid resource location {resource_location}")
 
-        source_path = normalize_path(source_path)
+        source_path = source_path.resolve()
 
         self._lock.acquire()
 
@@ -97,7 +94,7 @@ class ResourceIndex:
 
     def get_definitions(
         self, resource_location: str
-    ) -> list[tuple[str, SourceLocation, SourceLocation]]:
+    ) -> list[tuple[Path, SourceLocation, SourceLocation]]:
         if not (file := self._files.get(resource_location)):
             return []
 
@@ -110,7 +107,7 @@ class ResourceIndex:
 
     def get_references(
         self, resource_location: str
-    ) -> list[tuple[str, SourceLocation, SourceLocation]]:
+    ) -> list[tuple[Path, SourceLocation, SourceLocation]]:
         if not (file := self._files.get(resource_location)):
             return []
 
@@ -124,7 +121,7 @@ class ResourceIndex:
     def add_reference(
         self,
         resource_path: str,
-        source_path: str,
+        source_path: Path,
         source_location: FilePointer = (
             SourceLocation(0, 0, 0),
             SourceLocation(0, 0, 0),
@@ -133,7 +130,7 @@ class ResourceIndex:
         if not valid_resource_location(resource_path):
             raise Exception(f"Invalid resource location {resource_path}")
 
-        source_path = normalize_path(source_path)
+        source_path = source_path.resolve()
 
         self._lock.acquire()
 
@@ -174,13 +171,13 @@ class AegisProjectIndex:
     def __getitem__(self, key: type[NamespaceFile]):
         return self._resources.setdefault(key, ResourceIndex())
 
-    def remove_associated(self, path: str):
+    def remove_associated(self, path: Path):
         for resource, index in self._resources.items():
             removed_files = index.remove_associated(path)
 
             for removed in removed_files:
                 for pack in self._ctx.packs:
-                    if not removed in pack[resource]:
+                    if removed not in pack[resource]:
                         continue
 
                     file = pack[resource][removed]
