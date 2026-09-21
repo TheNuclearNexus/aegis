@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import logging
+import os
+import sys
 
 from aegis_core.indexing.project_index import AegisProjectIndex
 from lsprotocol import types as lsp
@@ -117,7 +119,6 @@ def add_arguments(parser: argparse.ArgumentParser):
 
 
 def main():
-    print("Starting Aegis Server")
     parser = argparse.ArgumentParser()
     add_arguments(parser)
     args = parser.parse_args()
@@ -132,7 +133,14 @@ def main():
     elif args.ws:
         aegis_server.start_ws(args.host, args.port)
     else:
-        aegis_server.start_io()
+        # The stdio transport shares the process' stdout with the LSP stream.
+        # Keep a private handle to the real stdout for JSON-RPC and redirect
+        # fd 1 (and sys.stdout) to stderr, so anything printed by libraries,
+        # project plugins or child processes cannot corrupt the protocol.
+        lsp_stdout = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        sys.stdout = sys.stderr
+        aegis_server.start_io(stdout=lsp_stdout)
 
     aegis_server._kill()
 
