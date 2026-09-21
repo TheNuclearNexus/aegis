@@ -106,10 +106,11 @@ class TypeInfo:
 
 def get_type_info(_type: type) -> TypeInfo:
     if _type in TYPE_TO_INFO:
-        return TYPE_TO_INFO[type]
+        return TYPE_TO_INFO[_type]
 
     info = TypeInfo(_type.__doc__)
-
+    TYPE_TO_INFO[_type] = info    
+    
     # logging.debug("\n\n")
     # logging.debug("-" * 50)
     # logging.debug("Indexing type " + _type.__name__)

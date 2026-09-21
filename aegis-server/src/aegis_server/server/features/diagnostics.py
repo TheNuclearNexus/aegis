@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import traceback
+from threading import Timer
 
 import lsprotocol.types as lsp
 from mecha import Diagnostic
@@ -56,3 +58,21 @@ async def publish_diagnostics(
         params.text_document.uri,
         diagnostics,
     )
+
+
+DEBOUNCE_DELAY = 0.3
+
+_pending: dict[str, Timer] = {}
+
+def debounce_diagnostics(
+    ls: AegisServer,
+    params: lsp.DidChangeTextDocumentParams
+):
+    uri = params.text_document.uri
+
+    if pending := _pending.get(uri):
+        pending.cancel()
+
+    timer = Timer(DEBOUNCE_DELAY, lambda: asyncio.run(publish_diagnostics(ls, params)))
+    _pending[uri] = timer
+    timer.start()

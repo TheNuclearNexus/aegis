@@ -65,8 +65,10 @@ async def get_compilation_data(ctx: LanguageServerContext, text_doc: TextDocumen
 
     resource = ctx.path_to_resource.get(Path(text_doc.path))
 
-    if resource and resource[0] in COMPILATION_RESULTS:
-        return COMPILATION_RESULTS[resource[0]]
+    if resource:
+        cached = COMPILATION_RESULTS.get(resource[0])
+        if cached is not None and cached.source_hash == hash(text_doc.source):
+            return cached
 
     await validate_function(ctx, text_doc)
 
@@ -105,10 +107,16 @@ async def validate_function(
     logging.debug(f"Starting compilation of `{path}`")
 
     location, file = ctx.path_to_resource[path]
+    source_hash = hash(text_doc.source)
+
+    cached = COMPILATION_RESULTS.get(location)
+    if cached is not None and cached.source_hash == source_hash:
+        logging.debug("Reusing cached compilation.")
+        return cached.diagnostics
 
     if not isinstance(file, Function) and not isinstance(file, Module):
         COMPILATION_RESULTS[location] = CompiledDocument(
-            ctx, location, None, [], None, None
+            ctx, location, None, [], None, None, source_hash=source_hash
         )
         logging.debug("File is not a function or module.")
         return []
@@ -120,6 +128,7 @@ async def validate_function(
             path,
             type(file)(text_doc.source, text_doc.path),
         )
+        compiled_doc.source_hash = source_hash
 
         COMPILATION_RESULTS[location] = compiled_doc
         res = compiled_doc.diagnostics

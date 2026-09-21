@@ -11,7 +11,7 @@ from .server import AegisServer
 from .server.features import hover as hover_feature
 from .server.features.completion import completion
 from .server.features.definition import get_definition
-from .server.features.diagnostics import publish_diagnostics
+from .server.features.diagnostics import debounce_diagnostics, publish_diagnostics
 from .server.features.hover import get_hover
 from .server.features.references import get_references
 from .server.features.rename import rename_variable
@@ -25,10 +25,9 @@ from .server.features.semantics import (
 def create_server():
     server = AegisServer("aegis-server", __version__)
 
-    @server.thread()
     @server.feature(lsp.TEXT_DOCUMENT_DID_CHANGE)
     def did_change(ls: AegisServer, params: lsp.DidChangeTextDocumentParams):
-        asyncio.run(publish_diagnostics(ls, params))
+        debounce_diagnostics(ls, params)
 
     @server.thread()
     @server.feature(lsp.TEXT_DOCUMENT_DID_OPEN)

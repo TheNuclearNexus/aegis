@@ -29,3 +29,4 @@ class CompiledDocument:
     compiled_module: CompiledModule | None
 
     dependents: set[str] = extra_field(default_factory=set)
+    source_hash: int = 0
