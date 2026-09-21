@@ -15,9 +15,9 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "bolt", specifier = ">=0.50.0,<0.51" },
+    { name = "bolt", specifier = ">=0.51.0,<0.52" },
     { name = "lsprotocol", specifier = ">=2023.0.1,<2024" },
-    { name = "mecha", specifier = ">=0.103.0,<0.104" },
+    { name = "mecha", specifier = ">=0.105.0,<0.106" },
     { name = "numpy", specifier = "==2.4.1" },
 ]
 
@@ -92,7 +92,7 @@ wheels = [
 
 [[package]]
 name = "beet"
-version = "0.115.0"
+version = "0.118.0"
 source = { editable = "../../beet" }
 dependencies = [
     { name = "click" },
@@ -154,7 +154,7 @@ wheels = [
 
 [[package]]
 name = "bolt"
-version = "0.50.1"
+version = "0.51.0"
 source = { editable = "../../beet/packages/bolt" }
 dependencies = [
     { name = "beet" },
@@ -364,7 +364,7 @@ wheels = [
 
 [[package]]
 name = "mecha"
-version = "0.103.0"
+version = "0.105.0"
 source = { editable = "../../beet/packages/mecha" }
 dependencies = [
     { name = "beet" },
