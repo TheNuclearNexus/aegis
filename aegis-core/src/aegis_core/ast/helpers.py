@@ -49,7 +49,7 @@ def clear_metadata(resource_location: str):
     _metadata_storage[resource_location] = dict()
 
 def _hash_node(node: AstNode):
-    return hash(hash(type(node).__name__) + hash(node.location.pos))
+    return hash((type(node).__name__, node.location.pos, node.end_location.pos))
 
 def attach_metadata(resource_location: str, node: AstNode|int, metadata: BaseMetadata):
     """

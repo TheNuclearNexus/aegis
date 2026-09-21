@@ -69,7 +69,18 @@ def wrap_nested_location(
     node: AstNestedLocation,
 ):
     new_node = original_rule(self, node)
-    # return set_dict(new_node, node)
+
+    database = self.nested_location_resolver.database
+    resource_location = database[database.current].resource_location
+
+    if resource_location:
+        metadata = (
+            retrieve_metadata(resource_location, new_node, ResourceLocationMetadata)
+            or ResourceLocationMetadata()
+        )
+        metadata.unresolved_path = "#" * node.is_tag + "~/" + node.path
+        attach_metadata(resource_location, new_node, metadata)
+
     return new_node
 
 

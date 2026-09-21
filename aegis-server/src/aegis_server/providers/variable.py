@@ -8,7 +8,7 @@ from aegis_core.reflection import (
     get_annotation_description,
     search_scope_for_binding,
 )
-from aegis_core.semantics import TokenModifier, TokenType
+from aegis_core.semantics import IMPLICIT_PARAMETERS, PASCAL_CASE, TokenModifier, TokenType
 from aegis_core.reflection.type_representation import (
     CallableRepresentation,
     ClassRepresentation,
@@ -168,13 +168,14 @@ def generic_variable_token(
     elif annotation is not None and (isinstance(annotation, CallableRepresentation)):
         nodes.append((identifier, "function", []))
     else:
-        kind = "variable"
+        kind = IMPLICIT_PARAMETERS.get(variable_name, "variable")
         modifiers: list[TokenModifier] = []
 
-        if variable_name.isupper():
-            modifiers.append("readonly")
-        elif variable_name == "self":
-            kind = "macro"
+        if kind == "variable":
+            if variable_name.isupper():
+                modifiers.append("readonly")
+            elif PASCAL_CASE.match(variable_name):
+                kind = "class"
 
         nodes.append(
             (

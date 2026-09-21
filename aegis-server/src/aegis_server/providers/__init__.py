@@ -6,7 +6,6 @@ from bolt import (
     AstClassName,
     AstFormatString,
     AstFunctionSignature,
-    AstFunctionSignatureArgument,
     AstIdentifier,
     AstImportedItem,
     AstTargetAttribute,
@@ -32,7 +31,6 @@ PROVIDERS: dict[type[AstNode], type[BaseFeatureProvider]] = {
     AstImportedItem: VariableFeatureProvider,
     AstClassName: ClassNameProvider,
     AstFunctionSignature: FunctionSignatureProvider,
-    AstFunctionSignatureArgument: FunctionSignatureArgProvider,
     AstValue: ValueProvider,
     AstFormatString: FormatStringProvider,
     # Mecha Specific

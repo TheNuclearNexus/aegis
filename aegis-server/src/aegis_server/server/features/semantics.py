@@ -1,14 +1,19 @@
-import logging, traceback
+import builtins, logging, traceback
 from dataclasses import dataclass, field
 from typing import get_args
 
 from aegis_core.ast.features import AegisFeatureProviders
 from aegis_core.ast.features.provider import SemanticsParams
 from aegis_core.ast.helpers import offset_location
+from aegis_core.ast.metadata import ResourceLocationMetadata, retrieve_metadata
 from beet import Context
 from beet.core.utils import required_field
 from bolt import (
+    AstAttribute,
+    AstCall,
+    AstDecorator,
     AstFromImport,
+    AstIdentifier,
     AstImportedItem,
     AstPrelude,
 )
@@ -23,10 +28,16 @@ from mecha import (
 )
 from tokenstream import SourceLocation
 
-from aegis_core.semantics import TokenModifier, TokenType
+from aegis_core.semantics import PASCAL_CASE, TokenModifier, TokenType
 
 from ...server import AegisServer
 from ..features.validate import get_compilation_data
+
+BUILTIN_CLASSES = {
+    name
+    for name, value in vars(builtins).items()
+    if isinstance(value, type) and not name.startswith("_")
+}
 
 TOKEN_TYPES: dict[TokenType, int] = {
     get_args(literal)[0]: i for (i, literal) in enumerate(get_args(TokenType))
@@ -69,8 +80,11 @@ def node_to_token(
 @dataclass
 class SemanticTokenCollector(Reducer):
     nodes: list[tuple[AstNode, int, int]] = field(default_factory=list)
+    overrides: list[tuple[AstNode, int, int]] = field(default_factory=list)
+    imported_modules: set[str] = field(default_factory=set)
     ctx: Context = required_field()
     resource_location: str = required_field()
+    source: str = required_field()
 
     @rule(AstCommand)
     def command(self, node: AstCommand):
@@ -82,18 +96,20 @@ class SemanticTokenCollector(Reducer):
                     self.nodes.append(
                         (
                             m,
-                            TOKEN_TYPES["class" if m.namespace == None else "function"],
+                            TOKEN_TYPES["module"],
                             0,
                         )
                     )
+                    self.imported_modules.add(m.path.partition(".")[0])
             case "import:module:as:alias":
                 module: AstResourceLocation = node.arguments[0]  # type: ignore
                 item: AstImportedItem = node.arguments[1]  # type: ignore
 
-                type = TOKEN_TYPES["class" if module.namespace == None else "function"]
+                type = TOKEN_TYPES["module"]
 
                 self.nodes.append((module, type, 0))
                 self.nodes.append((item, type, 0))
+                self.imported_modules.add(item.name)
 
         end_location = node.end_location
 
@@ -139,7 +155,7 @@ class SemanticTokenCollector(Reducer):
         self.nodes.append(
             (
                 location,
-                TOKEN_TYPES["class" if location.namespace == None else "function"],
+                TOKEN_TYPES["module"],
                 0,
             )
         )
@@ -156,10 +172,77 @@ class SemanticTokenCollector(Reducer):
             )
         )
 
+    def override_callable(self, target: AstNode):
+        if isinstance(target, AstIdentifier):
+            name, location = target.value, target.location
+            builtin = name in BUILTIN_CLASSES
+        elif isinstance(target, AstAttribute):
+            name = target.name
+            location = offset_location(target.end_location, -len(name))
+            builtin = False
+        else:
+            return
+
+        self.overrides.append(
+            (
+                AstNode(location, offset_location(location, len(name))),
+                TOKEN_TYPES[
+                    "class" if builtin or PASCAL_CASE.match(name) else "function"
+                ],
+                0,
+            )
+        )
+
+    @rule(AstCall)
+    def call(self, node: AstCall):
+        self.override_callable(node.value)
+
+    @rule(AstDecorator)
+    def decorator(self, node: AstDecorator):
+        self.nodes.append(
+            (
+                AstNode(node.location, offset_location(node.location, 1)),
+                TOKEN_TYPES["decorator"],
+                0,
+            )
+        )
+
+        target = node.expression
+        if isinstance(target, AstCall):
+            target = target.value
+
+        while isinstance(target, AstAttribute):
+            location = offset_location(target.end_location, -len(target.name))
+            self.overrides.append(
+                (AstNode(location, target.end_location), TOKEN_TYPES["decorator"], 0)
+            )
+            target = target.value
+
+        if (
+            isinstance(target, AstIdentifier)
+            and target.value not in self.imported_modules
+        ):
+            self.overrides.append((target, TOKEN_TYPES["decorator"], 0))
+
+    @rule(AstIdentifier)
+    def identifier(self, node: AstIdentifier):
+        if node.value in self.imported_modules:
+            self.overrides.append((node, TOKEN_TYPES["module"], 0))
+
     @rule(AstNode)
     def node(self, node: AstNode):
         provider = self.ctx.inject(AegisFeatureProviders).retrieve(node)
         try:
+            if isinstance(node, AstResourceLocation):
+                metadata = retrieve_metadata(
+                    self.resource_location, node, ResourceLocationMetadata
+                )
+                if self.source[node.location.pos : node.end_location.pos] not in (
+                    node.get_value(),
+                    metadata.unresolved_path if metadata else None,
+                ):
+                    return
+            
             tokens = provider.semantics(
                 SemanticsParams(self.ctx, node, self.resource_location)
             )
@@ -184,20 +267,30 @@ class SemanticTokenCollector(Reducer):
 
     def walk(self, root: AstNode):
         self.nodes = []
+        self.overrides = []
+        self.imported_modules = set()
         self.__call__(root)
+        self.nodes.extend(self.overrides)
 
         tokens: list[tuple[int, ...]] = []
 
-        self.nodes = sorted(self.nodes, key=lambda n: n[0].location.pos)
-        for i in range(len(self.nodes)):
-            prev_node = None
-            if i > 0:
-                prev_node = self.nodes[i - 1][0]
+        self.nodes = list(
+            {
+                (n.location.pos, n.end_location.pos): (n, t, m)
+                for n, t, m in self.nodes
+            }.values()
+        )
 
-            node, type, modifier = self.nodes[i]
+        self.nodes.sort(key=lambda n: (n[0].location.lineno, n[0].location.colno))
+
+        prev_node = None
+        for node, type, modifier in self.nodes:
+            if node.end_location.pos - node.location.pos <= 0:
+                continue
+
             tokens.append(node_to_token(node, type, modifier, prev_node))
+            prev_node = node
 
-        # logging.debug(tokens)
         return list(sum(tokens, ()))
 
 
@@ -212,7 +305,9 @@ async def semantic_tokens(ls: AegisServer, params: lsp.SemanticTokensParams):
 
                 data = (
                     SemanticTokenCollector(
-                        ctx=ctx, resource_location=compiled_doc.resource_location
+                        ctx=ctx,
+                        resource_location=compiled_doc.resource_location,
+                        source=text_doc.source,
                     ).walk(ast)
                     if ast
                     else []

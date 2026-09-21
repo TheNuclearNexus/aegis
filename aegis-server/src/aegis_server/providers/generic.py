@@ -1,16 +1,16 @@
 import logging
 import re
-from types import NoneType
 from typing import ClassVar
 from aegis_core.ast.features.provider import BaseFeatureProvider
 from aegis_core.ast.helpers import offset_location
-from aegis_core.ast.metadata import VariableMetadata, retrieve_metadata
-from aegis_core.semantics import TokenModifier, TokenType
+from aegis_core.semantics import IMPLICIT_PARAMETERS, TokenModifier, TokenType
 from bolt import (
     AstClassName,
     AstFormatString,
     AstFunctionSignature,
     AstFunctionSignatureArgument,
+    AstFunctionSignatureVariadicArgument,
+    AstFunctionSignatureVariadicKeywordArgument,
     AstValue,
 )
 from mecha import AstNode
@@ -22,7 +22,6 @@ __all__ = [
     "ItemSlotProvider",
     "ClassNameProvider",
     "FunctionSignatureProvider",
-    "FunctionSignatureArgProvider",
     "ValueProvider",
     "FormatStringProvider",
 ]
@@ -42,54 +41,50 @@ class ClassNameProvider(BaseFeatureProvider[AstClassName]):
         return [(params.node, "class", [])]
 
 
+def _name_node(node: AstNode, name: str):
+    return AstNode(node.location, offset_location(node.location, len(name)))
+
+
 class FunctionSignatureProvider(BaseFeatureProvider[AstFunctionSignature]):
     @classmethod
     def semantics(cls, params):
         signature = params.node
-        location = signature.location
-        node = AstNode(
-            location=location,
-            end_location=offset_location(signature.location, len(signature.name)),
-        )
+        name = signature.name
+        magic = name.startswith("__") and name.endswith("__")
 
-        tokens = [(node, "function", [])]
+        tokens: list[tuple[AstNode, TokenType, list[TokenModifier]]] = [
+            (_name_node(signature, name), "magicFunction" if magic else "function", [])
+        ]
 
-        if len(signature.arguments) >= 1:
-            first = signature.arguments[0]
+        for index, argument in enumerate(signature.arguments):
+            match argument:
+                case AstFunctionSignatureArgument():
+                    kind = "parameter"
+                    if index == 0:
+                        kind = IMPLICIT_PARAMETERS.get(argument.name, kind)
 
-            if isinstance(first, AstFunctionSignatureArgument) and first.name == "self":
-                tokens.append((first, "macro", []))
+                    tokens.append((_name_node(argument, argument.name), kind, []))
+                case (
+                    AstFunctionSignatureVariadicArgument()
+                    | AstFunctionSignatureVariadicKeywordArgument()
+                ):
+                    end = argument.end_location
+                    start = offset_location(end, -len(argument.name))
+                    tokens.append((AstNode(start, end), "parameter", []))
 
         return tokens
-
-
-class FunctionSignatureArgProvider(BaseFeatureProvider[AstFunctionSignatureArgument]):
-    @classmethod
-    def semantics(cls, params):
-        if params.node.type_annotation:
-            return [(params.node.type_annotation, "class", [])]
-
-        return None
 
 
 class ValueProvider(BaseFeatureProvider[AstValue]):
     @classmethod
     def semantics(cls, params):
-        value = params.node
-
-        metadata = retrieve_metadata(params.resource_location, value, VariableMetadata)
-
-        if not metadata or not metadata.type_annotation:
-            return None
-
-        annotation = metadata.type_annotation
-
-        if annotation is NoneType:
-
-            return [(value, "variable", ["readonly"])]
-
-        elif annotation is bool:
-            return [(value, "macro", [])]
+        match params.node.value:
+            case bool() | None:
+                return [(params.node, "builtinConstant", [])]
+            case int() | float():
+                return [(params.node, "number", [])]
+            case str():
+                return [(params.node, "string", [])]
 
         return None
 

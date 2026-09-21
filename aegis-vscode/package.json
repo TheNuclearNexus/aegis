@@ -105,6 +105,71 @@
                     }
                 }
             }
+        ],
+        "semanticTokenTypes": [
+            {
+                "id": "selfParameter",
+                "superType": "parameter",
+                "description": "The self parameter of a method."
+            },
+            {
+                "id": "clsParameter",
+                "superType": "parameter",
+                "description": "The cls parameter of a class method."
+            },
+            {
+                "id": "magicFunction",
+                "superType": "function",
+                "description": "A dunder method."
+            },
+            {
+                "id": "builtinConstant",
+                "description": "True, False or None."
+            },
+            {
+                "id": "module",
+                "superType": "namespace",
+                "description": "An imported module."
+            }
+        ],
+        "semanticTokenScopes": [
+            {
+                "language": "mcfunction",
+                "scopes": {
+                    "selfParameter": [
+                        "variable.language.special.self.python",
+                        "variable.language"
+                    ],
+                    "clsParameter": [
+                        "variable.language.special.cls.python",
+                        "variable.language"
+                    ],
+                    "magicFunction": [
+                        "support.function.magic.python",
+                        "support.function"
+                    ],
+                    "decorator": [
+                        "entity.name.function.decorator.python",
+                        "entity.name.function"
+                    ],
+                    "module": [
+                        "entity.name.namespace",
+                        "entity.name.type.class"
+                    ],
+                    "builtinConstant": [
+                        "constant.language.python",
+                        "constant.language"
+                    ],
+                    "number": [
+                        "constant.numeric.python",
+                        "constant.numeric"
+                    ],
+                    "string": [
+                        "string.quoted.single.python",
+                        "string.quoted"
+                    ]
+                }
+            }
         ]
     },
     "main": "./dist/extension",

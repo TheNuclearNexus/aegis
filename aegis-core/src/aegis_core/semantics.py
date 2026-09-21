@@ -1,3 +1,4 @@
+import re
 from typing import Literal, Union
 
 TokenModifier = Union[
@@ -35,4 +36,16 @@ TokenType = Union[
     Literal["parameter"],
     Literal["property"],
     Literal["label"],
+    Literal["selfParameter"],
+    Literal["clsParameter"],
+    Literal["magicFunction"],
+    Literal["builtinConstant"],
+    Literal["module"],
 ]
+
+IMPLICIT_PARAMETERS: dict[str, TokenType] = {
+    "self": "selfParameter",
+    "cls": "clsParameter",
+}
+
+PASCAL_CASE = re.compile(r"[A-Z][a-zA-Z0-9]*[a-z][a-zA-Z0-9]*$")
