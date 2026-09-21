@@ -146,6 +146,16 @@ class ResourceIndex:
         for item in items:
             yield item
 
+    def defined_locations(self):
+        """Iterate over resource locations backed by at least one definition.
+
+        Locations that only have references (i.e. paths that were merely typed
+        somewhere but don't resolve to an actual file) are excluded.
+        """
+        for location, indice in self._files.items():
+            if indice.definitions:
+                yield location
+
     def _dump(self) -> str:
         dump = ""
 

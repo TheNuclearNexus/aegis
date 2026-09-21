@@ -61,6 +61,33 @@
                         "type": "array",
                         "description": "Which plugins should be loaded into Beet"
                     },
+                    "aegis.server.pythonPath": {
+                        "scope": "resource",
+                        "type": "string",
+                        "description": "Path to the Python interpreter used to launch the language server. If blank, the environment selected in the Python extension is used."
+                    },
+                    "aegis.server.transport": {
+                        "scope": "resource",
+                        "type": "string",
+                        "default": "auto",
+                        "enum": [
+                            "auto",
+                            "socket",
+                            "stdio"
+                        ],
+                        "enumDescriptions": [
+                            "Use a TCP socket in development and stdio in production.",
+                            "Connect to a server listening on a TCP socket (SERVER_PORT).",
+                            "Launch the server as a child process and speak JSON-RPC over stdio."
+                        ],
+                        "description": "Transport used to communicate with the language server."
+                    },
+                    "aegis.server.debug": {
+                        "scope": "resource",
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Start the Python debugger when launching the language server."
+                    },
                     "aegis.client.hide_env_warnings": {
                         "scope": "resource",
                         "type": "boolean",

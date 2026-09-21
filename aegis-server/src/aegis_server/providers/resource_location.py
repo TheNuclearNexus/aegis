@@ -148,7 +148,7 @@ class ResourceLocationFeatureProvider(BaseFeatureProvider[AstResourceLocation]):
 
             items = []
 
-            for file in project_index[represents]:
+            for file in project_index[represents].defined_locations():
                 file_path = get_path(file)
 
                 if not (

@@ -35,8 +35,8 @@ import {
 import { execFile, ExecFileException } from "child_process";
 import * as JSZip from "jszip";
 
-const MIN_PYTHON = semver.parse("3.14.0");
-const MIN_BEET = semver.parse("0.113.0");
+const MIN_PYTHON = semver.parse("3.14.0")!;
+const MIN_BEET = semver.parse("0.113.0")!;
 
 // Some other nice to haves.
 // TODO: Check selected env satisfies aegis' requirements - if not offer to run the select env command.
@@ -44,7 +44,7 @@ const MIN_BEET = semver.parse("0.113.0");
 // TODO: WS Transport
 // TODO: Web Extension support (requires WASM-WASI!)
 
-let client: LanguageClient;
+let client: LanguageClient | undefined;
 let clientStarting = false;
 let didClientFail = false;
 let python: PythonExtension;
@@ -109,10 +109,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
         const filePath = path.join(context.extensionPath, "..", "update.vsix");
 
-        fs.writeFileSync(
-            filePath,
-            await zip.file(extension).async("nodebuffer"),
-        );
+        const vsix = zip.file(extension);
+        if (!vsix) {
+            return vscode.window.showErrorMessage(
+                "Failed to read .vsix from zip",
+            );
+        }
+
+        fs.writeFileSync(filePath, await vsix.async("nodebuffer"));
 
         if (context.extensionMode == vscode.ExtensionMode.Production) {
             await vscode.commands.executeCommand(
@@ -225,10 +229,24 @@ async function onNotification() {}
 async function startLangServer(context: vscode.ExtensionContext) {
     // Don't interfere if we are already in the process of launching the server.
     if (clientStarting) {
+        logger.warn("Already starting the language server, ignoring request.");
         return;
     }
 
     clientStarting = true;
+    try {
+        await startLangServerInner(context);
+    } catch (err) {
+        logger.error(`Failed to start the language server: ${err}`);
+        didClientFail = true;
+    } finally {
+        // Always release the guard, otherwise a hung/failed start makes every
+        // subsequent restart a no-op.
+        clientStarting = false;
+    }
+}
+
+async function startLangServerInner(context: vscode.ExtensionContext) {
     if (client) {
         await stopLangServer();
     }
@@ -245,7 +263,45 @@ async function startLangServer(context: vscode.ExtensionContext) {
     logger.info(`server: '${serverPath}'`);
 
     const resource = vscode.Uri.joinPath(vscode.Uri.file(cwd), serverPath);
-    const pythonCommand = await getPythonCommand(resource);
+
+    // Dev vs production is determined by how the extension is loaded rather than
+    // by an environment variable so the extension development host and the
+    // packaged extension follow the same code path.
+    const isDev = context.extensionMode !== vscode.ExtensionMode.Production;
+    const transport =
+        process.env.AEGIS_TRANSPORT ?? config.get<string>("transport") ?? "auto";
+    // "auto" means stdio everywhere. The TCP socket flow is opt-in through
+    // `aegis.server.transport: "socket"` or AEGIS_TRANSPORT=socket.
+    const useSocket = transport === "socket";
+
+    logger.info(`transport: '${transport}' (socket: ${useSocket}, dev: ${isDev})`);
+
+    // When running from source over stdio, prefer the repository's own server
+    // environment so the server's dependencies (pygls, lsprotocol, ...) are
+    // available even if a project environment is selected for the workspace.
+    const localServerPython =
+        process.env.AEGIS_PYTHON ??
+        path.join(
+            context.extensionPath,
+            "..",
+            "aegis-server",
+            ".venv",
+            process.platform === "win32" ? "Scripts" : "bin",
+            process.platform === "win32" ? "python.exe" : "python",
+        );
+    const devPython =
+        isDev && !useSocket && fs.existsSync(localServerPython)
+            ? localServerPython
+            : undefined;
+
+    const pythonCommand = await getPythonCommand(resource, useSocket, devPython);
+    if (!pythonCommand) {
+        logger.error(
+            "No Python interpreter configured, cannot start the language server.",
+        );
+        didClientFail = true;
+        return;
+    }
 
     logger.debug("Checking enviroment...");
     const successful = await checkEnviroment(context, pythonCommand);
@@ -264,39 +320,57 @@ async function startLangServer(context: vscode.ExtensionContext) {
     }
 
     logger.debug(`python: ${pythonCommand.join(" ")}`);
-    logger.debug(process.env.DEV);
-    const serverOptions: ServerOptions =
-        process.env.DEV == "true"
-            ? () => {
-                  return new Promise((resolve /*, reject */) => {
-                      const clientSocket = new net.Socket();
-                      clientSocket.connect(
-                          Number.parseInt(process.env.SERVER_PORT ?? "4000"),
-                          "127.0.0.1",
-                          () => {
-                              resolve({
-                                  reader: clientSocket,
-                                  writer: clientSocket,
-                              });
-                          },
-                      );
-                  });
-              }
-            : (() => {
-                  const options = {
-                      command: pythonCommand[0],
-                      args: [
-                          context.asAbsolutePath("language_server.pyz"),
-                          ...args,
-                      ],
-                      options: { cwd },
-                  };
+    const serverOptions: ServerOptions = useSocket
+        ? () => {
+              return new Promise((resolve, reject) => {
+                  const clientSocket = new net.Socket();
+                  clientSocket.once("error", reject);
+                  clientSocket.connect(
+                      Number.parseInt(process.env.SERVER_PORT ?? "4000"),
+                      "127.0.0.1",
+                      () => {
+                          clientSocket.off("error", reject);
+                          resolve({
+                              reader: clientSocket,
+                              writer: clientSocket,
+                          });
+                      },
+                  );
+              });
+          }
+        : (() => {
+              // In development run the server from source over stdio so edits
+              // take effect without rebuilding the zipapp. In production use
+              // the bundled zipapp.
+              const serverArgs = isDev
+                  ? ["-m", "aegis_server", ...args]
+                  : [context.asAbsolutePath("language_server.pyz"), ...args];
 
-                  logger.info([options.command, ...options.args].join(" "));
-                  logger.info(JSON.stringify(options));
+              const repoRoot = path.join(context.extensionPath, "..");
+              const options = {
+                  command: pythonCommand[0],
+                  args: serverArgs,
+                  options: {
+                      cwd,
+                      env: isDev
+                          ? {
+                                ...process.env,
+                                PYTHONPATH: [
+                                    path.join(repoRoot, "aegis-server", "src"),
+                                    path.join(repoRoot, "aegis-core", "src"),
+                                    process.env.PYTHONPATH,
+                                ]
+                                    .filter(Boolean)
+                                    .join(path.delimiter),
+                            }
+                          : process.env,
+                  },
+              };
 
-                  return options;
-              })();
+              logger.info([options.command, ...options.args].join(" "));
+
+              return options;
+          })();
 
     client = new LanguageClient("aegis-lsp", serverOptions, getClientOptions());
 
@@ -307,7 +381,6 @@ async function startLangServer(context: vscode.ExtensionContext) {
     }
 
     const results = await Promise.allSettled(promises);
-    clientStarting = false;
 
     for (const result of results) {
         if (result.status === "rejected") {
@@ -324,7 +397,9 @@ async function checkEnviroment(
     context: vscode.ExtensionContext,
     pythonCommand: string[],
 ): Promise<boolean> {
-    const configurePythonAction = (selection: "Configure Python") => {
+    const configurePythonAction = (
+        selection: "Configure Python" | undefined,
+    ) => {
         if (selection != "Configure Python") return;
 
         if (!python)
@@ -412,7 +487,7 @@ async function checkEnviroment(
 function updateFileAssociation() {
     const config = vscode.workspace.getConfiguration();
     const associations: Record<string, string> =
-        config.get("files.associations");
+        config.get<Record<string, string>>("files.associations") ?? {};
 
     associations["*.bolt"] = "mcfunction";
     config.update("files.associations", associations);
@@ -552,22 +627,29 @@ async function getSitePackages(pythonCommand: string): Promise<string[]> {
         if (data instanceof Array) return data;
         return [];
     } catch (e) {
-        logger.error(e);
+        logger.error(e instanceof Error ? e : String(e));
         return [];
     }
 }
 
 async function stopLangServer(): Promise<void> {
-    if (!client) {
+    const current = client;
+    if (!current) {
         return;
     }
-
-    if (client.state === State.Running) {
-        await client.stop();
-    }
-
-    client.dispose();
+    // Clear the reference first so a slow/failed stop can never wedge future
+    // restarts.
     client = undefined;
+
+    try {
+        if (current.state === State.Running) {
+            await current.stop();
+        }
+    } catch (err) {
+        logger.error(`Failed to stop the language server: ${err}`);
+    } finally {
+        current.dispose();
+    }
 }
 
 function startDebugging(): Promise<void> {
@@ -577,13 +659,15 @@ function startDebugging(): Promise<void> {
             "Unable to start debugging, there is no workspace.",
         );
     }
+    const workspaceFolder = vscode.workspace.workspaceFolders[0];
     // TODO: Is there a more reliable way to ensure the debug adapter is ready?
     setTimeout(async () => {
         await vscode.debug.startDebugging(
-            vscode.workspace.workspaceFolders[0],
+            workspaceFolder,
             "aegis: Debug Server",
         );
     }, 2000);
+    return Promise.resolve();
 }
 
 function getClientOptions(): LanguageClientOptions {
@@ -610,10 +694,18 @@ async function executeServerCommand() {
         return;
     }
 
+    const initializeResult = client.initializeResult;
+    if (!initializeResult) {
+        await vscode.window.showErrorMessage(
+            "The language server has not finished initializing.",
+        );
+        return;
+    }
+
     const knownCommands =
-        client.initializeResult.capabilities.executeCommandProvider?.commands;
+        initializeResult.capabilities.executeCommandProvider?.commands;
     if (!knownCommands || knownCommands.length === 0) {
-        const info = client.initializeResult.serverInfo;
+        const info = initializeResult.serverInfo;
         const name = info?.name || "Server";
         const version = info?.version || "";
 
@@ -649,13 +741,17 @@ async function executeServerCommand() {
  */
 async function getPythonCommand(
     resource?: vscode.Uri,
+    useSocket = false,
+    pythonPathOverride?: string,
 ): Promise<string[] | undefined> {
-    const pythonPath = await getPythonInterpreter(resource);
+    const pythonPath =
+        pythonPathOverride ?? (await getPythonInterpreter(resource));
     if (!pythonPath) {
         return;
     }
     const command = [pythonPath];
-    const enableDebugger = process.env.DEV === "true";
+    // The remote debug launcher only applies when connecting to a TCP server.
+    const enableDebugger = process.env.DEV === "true" && useSocket;
 
     if (!enableDebugger) {
         return command;
@@ -722,12 +818,18 @@ async function getPythonInterpreter(
 
     const v = activeEnv.version;
 
-    if (v.major == -1) {
+    if (!v || v.major == -1) {
         logger.error(`Could not resolve python version!`);
         return;
     }
 
     const pythonVersion = semver.parse(`${v.major}.${v.minor}.${v.micro}`);
+    if (!pythonVersion) {
+        logger.error(
+            `Could not parse python version: ${v.major}.${v.minor}.${v.micro}`,
+        );
+        return;
+    }
 
     // Check to see if the environment satisfies the min Python version.
     if (semver.lt(pythonVersion, MIN_PYTHON)) {
