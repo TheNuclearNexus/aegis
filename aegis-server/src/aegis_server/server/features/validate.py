@@ -194,7 +194,7 @@ async def parse_function(
                 ),
                 timeout=TIMEOUT_DURATION,
             )
-            ast, errors = results.get(file_instance, (None, []))
+            ast, errors = results[file_instance]
 
         except TimeoutError as exec:
             raise exec
@@ -231,7 +231,7 @@ def compile(
     resource_location: str,
     source_path: Path,
     source_file: Function | Module,
-) -> dict[TextFileBase[Any], tuple[AstNode | None, list[InvalidSyntax | Diagnostic]]]:
+) -> dict[TextFileBase[Any], tuple[AstNode, list[InvalidSyntax | Diagnostic]]]:
     mecha = ctx.inject(Mecha)
     runtime = ctx.inject(Runtime)
     diagnostics: dict[TextFileBase[Any], list[InvalidSyntax | Diagnostic]] = dict()
@@ -344,7 +344,6 @@ def compile(
 
                 except InvalidSyntax as exec:
                     logging.error(f"Failed to parse: {exec}")
-                    diagnostics.setdefault(file_instance, []).append(exec)
                 except KeyError as exec:
                     tb = "\n".join(traceback.format_tb(exec.__traceback__))
                     logging.error(f"{tb}")
@@ -395,15 +394,12 @@ def compile(
             logging.debug(f"Execution took {time.time() - start}s")
 
     results: dict[
-        TextFileBase[Any], tuple[AstNode | None, list[InvalidSyntax | Diagnostic]]
+        TextFileBase[Any], tuple[AstNode, list[InvalidSyntax | Diagnostic]]
     ] = dict()
     for file in frozen_asts:
         results[file] = (
             frozen_asts[file],
             diagnostics.get(file, []),
         )
-
-    for file, file_diagnostics in diagnostics.items():
-        results.setdefault(file, (None, file_diagnostics))
 
     return results

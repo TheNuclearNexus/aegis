@@ -50,11 +50,11 @@ logging.basicConfig(
 SUPPORTED_EXTENSIONS = [Function.extension, Module.extension]
 
 def get_parent_context(ctx: LanguageServerContext, file_path: Path) -> LanguageServerContext | None:
-    """Try to mount a given file path to the context. Context if the file was successfully mounted"""
+    """Try to mount a given file path to the context. True if the file was successfully mounted"""
 
     if file_path.suffix not in SUPPORTED_EXTENSIONS:
         return None
-
+    
     if file_path in ctx.path_to_resource:
         return ctx
     
@@ -62,13 +62,29 @@ def get_parent_context(ctx: LanguageServerContext, file_path: Path) -> LanguageS
         if parent := get_parent_context(child, file_path):
             return parent
 
+    load_options = ctx.project_config.data_pack.load
+    prefix = None
+    for entry in load_options.entries():
+        if isinstance(entry, dict):
+            for key, paths in entry.items():
+                for mount_path in paths.entries():
+                    if file_path.is_relative_to(mount_path):
+                        relative = file_path.relative_to(mount_path)
+                        prefix = str(key / relative)
+                        break
+
+        elif file_path.is_relative_to(entry):
+            relative = file_path.relative_to(entry)
+            prefix = str(relative)
+
+    if prefix is None:
+        return None
+
     try:
         # Mounting is done into a temp datapack to make it easier to get the file path
         # The other option which may be better is to monkey patch mount directly
-        temp = DataPack().configure(ctx.data)
-        for prefix, origin in ctx.mounts:
-            if file_path.is_relative_to(origin):
-                temp.mount(f"{prefix}/{file_path.relative_to(origin).as_posix()}", file_path)
+        temp = DataPack()
+        temp.mount(prefix, file_path)
         for [location, file] in temp.all():
             if not (isinstance(file, Function) or isinstance(file, Module)):
                 continue
@@ -78,18 +94,18 @@ def get_parent_context(ctx: LanguageServerContext, file_path: Path) -> LanguageS
             ctx.data[type(file)][location] = file
 
             logging.debug(f"Mounted {file_path} to {location}")
-            return ctx
+        return ctx
     except Exception as exc:
         logging.error(f"Failed to mount {file_path}, reloading datapack,\n{exc}")
 
     return None
 
 
+
 class AegisServer(LanguageServer):
     _instances: dict[Path, tuple[Lock, LanguageServerContext]] = dict()
     _sites: list[str] = []
     _index_thread: Thread
-    _triggered_rebuild: set[Path]
     _alive: bool = True
 
     def set_sites(self, sites: list[str]):
@@ -98,7 +114,6 @@ class AegisServer(LanguageServer):
     def __init__(self, *args):
         super().__init__(*args)
         self._instances = {}
-        self._triggered_rebuild = set()
         self._index_thread = Thread(
             target=lambda self, parent: self.scan_functions(parent),
             args=[self, threading.current_thread()],
@@ -275,7 +290,7 @@ class AegisServer(LanguageServer):
             if instance is not None:
                 self._instances[config_path] = (Lock(), instance)
 
-        return self._instances.get(config_path)
+        return self._instances[config_path]
 
     @contextmanager
     def context(
@@ -293,41 +308,17 @@ class AegisServer(LanguageServer):
             yield None
             return
 
-        instance = self.get_instance(parents[-1])
+        (lock, context) = self.get_instance(parents[-1])
 
-        if instance is None:
+        context = get_parent_context(context, doc_path)
+
+        if context is None:
             yield None
             return
 
-        (lock, context) = instance
-
         lock.acquire()
-        try:
-            found = get_parent_context(context, doc_path)
-
-            if (
-                found is None
-                and doc_path.suffix in SUPPORTED_EXTENSIONS
-                and doc_path not in self._triggered_rebuild
-            ):
-                self._triggered_rebuild.add(doc_path)
-                config_path = parents[-1]
-
-                try:
-                    rebuilt = self.create_instance(
-                        load_config(config_path), locate_config(config_path)
-                    )
-                except Exception as exc:
-                    logging.error(f"Failed to rebuild {config_path}\n{exc}")
-                    rebuilt = None
-
-                if rebuilt is not None:
-                    self._instances[config_path] = (lock, rebuilt)
-                    found = get_parent_context(rebuilt, doc_path)
-
-            yield found
-        finally:
-            lock.release()
+        yield context
+        lock.release()
 
     def _kill(self):
         self._alive = False
