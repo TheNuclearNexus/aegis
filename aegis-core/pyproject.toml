@@ -11,7 +11,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "mecha>=0.105.0,<0.106",
+    "mecha>=0.106.0,<0.107",
     "bolt>=0.51.0,<0.52",
     "lsprotocol>=2023.0.1,<2024",
     "numpy==2.4.1",
