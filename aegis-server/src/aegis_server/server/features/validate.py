@@ -394,6 +394,10 @@ def compile(
 
             logging.debug(f"Execution took {time.time() - start}s")
 
+        for file_instance, module in runtime.modules.registry.items():
+            if compilation_unit := database.get(file_instance):
+                compilation_unit.ast = module.ast
+
     results: dict[
         TextFileBase[Any], tuple[AstNode | None, list[InvalidSyntax | Diagnostic]]
     ] = dict()
