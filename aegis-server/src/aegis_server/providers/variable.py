@@ -232,6 +232,8 @@ class VariableFeatureProvider(
             logging.debug(f"\n\n{id(type_annotation)}\n{_hash_node(node)}\n\n")
 
             description = get_annotation_description(name, type_annotation)
+            if metadata.documentation:
+                description += f"\n---\n{metadata.documentation}"
 
             return lsp.Hover(
                 lsp.MarkupContent(lsp.MarkupKind.Markdown, description), text_range
