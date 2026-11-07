@@ -422,8 +422,8 @@ async function checkEnviroment(
 
     if (
         vscode.workspace
-            .getConfiguration("aegis")
-            .get("aegis.client.hide_env_warnings")
+            .getConfiguration("aegis.client")
+            .get("hide_env_warnings")
     )
         return true;
 
@@ -452,9 +452,9 @@ async function checkEnviroment(
                         await installBeet(pythonCommand[0]);
                     else if (selection == "Don't Show Again") {
                         vscode.workspace
-                            .getConfiguration("aegis")
+                            .getConfiguration("aegis.client")
                             .update(
-                                "aegis.client.hide_env_warnings",
+                                "hide_env_warnings",
                                 true,
                                 vscode.ConfigurationTarget.Workspace,
                             );
@@ -470,9 +470,9 @@ async function checkEnviroment(
                 .then((selection) => {
                     if (selection == "Don't Show Again") {
                         vscode.workspace
-                            .getConfiguration("aegis")
+                            .getConfiguration("aegis.client")
                             .update(
-                                "aegis.client.hide_env_warnings",
+                                "hide_env_warnings",
                                 true,
                                 vscode.ConfigurationTarget.Workspace,
                             );
@@ -535,9 +535,9 @@ async function checkForVenv(pythonCommand: string) {
                         );
                     } else if (selection == "Don't Show Again") {
                         vscode.workspace
-                            .getConfiguration("aegis")
+                            .getConfiguration("aegis.client")
                             .update(
-                                "aegis.client.hide_env_warnings",
+                                "hide_env_warnings",
                                 true,
                                 vscode.ConfigurationTarget.Workspace,
                             );
