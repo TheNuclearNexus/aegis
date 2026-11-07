@@ -20,7 +20,13 @@
         "Programming Languages"
     ],
     "activationEvents": [
-        "onStartupFinished"
+        "onLanguage:mcfunction",
+        "workspaceContains:**/*.mcfunction",
+        "workspaceContains:**/*.bolt",
+        "workspaceContains:**/beet.json",
+        "workspaceContains:**/beet.toml",
+        "workspaceContains:**/beet.yml",
+        "workspaceContains:**/beet.yaml"
     ],
     "contributes": {
         "commands": [

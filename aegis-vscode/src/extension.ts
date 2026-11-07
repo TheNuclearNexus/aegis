@@ -144,6 +144,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Restart the language server if the user switches Python envs...
     context.subscriptions.push(
         python.environments.onDidChangeActiveEnvironmentPath(async () => {
+            if (!(await isAegisWorkspace())) return;
             logger.info("python env modified, restarting server...");
 
             await startLangServer(context);
@@ -157,6 +158,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 event.affectsConfiguration("aegis.server") ||
                 event.affectsConfiguration("aegis.client")
             ) {
+                if (!(await isAegisWorkspace())) return;
                 logger.info("config modified, restarting server...");
                 await startLangServer(context);
             }
@@ -165,14 +167,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeTextDocument(async (event) => {
-            const fileName = event.document.fileName;
+            const fileName = path.basename(event.document.fileName);
             if (
-                !fileName.match(/beet.(json|toml|ya?ml)/g) &&
+                !fileName.match(/^beet\.(json|toml|ya?ml)$/) &&
                 fileName != "pyproject.toml"
             )
                 return;
 
-            if (didClientFail) return;
+            if (didClientFail || !(await isAegisWorkspace())) return;
             logger.info("Config modified, restarting server");
 
             await startLangServer(context);
@@ -180,36 +182,42 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     // Start the language server once the user opens the first text document...
+    const onOpenDocument = async (e: vscode.TextDocument) => {
+        if (!(await isAegisWorkspace())) return;
+
+        if (e.fileName.endsWith(".bolt") && e.languageId !== "mcfunction") {
+            vscode.window
+                .showWarningMessage(
+                    ".bolt files aren't associated with mcfunction, this might break highlighting.",
+                    "Configure Language Mode",
+                )
+                .then((s) => {
+                    if (s == "Configure Language Mode")
+                        updateFileAssociation();
+                });
+        }
+
+        if (!client && !didClientFail) {
+            await startLangServer(context);
+        }
+    };
+
     context.subscriptions.push(
-        vscode.workspace.onDidOpenTextDocument(async (e) => {
-            if (
-                (
-                    await vscode.workspace.findFiles(
-                        "**/*.{mcfunction,bolt}",
-                        null,
-                        1,
-                    )
-                ).length == 0
-            )
-                return;
-
-            if (e.fileName.endsWith(".bolt") && e.languageId !== "mcfunction") {
-                vscode.window
-                    .showWarningMessage(
-                        ".bolt files aren't associated with mcfunction, this might break highlighting.",
-                        "Configure Language Mode",
-                    )
-                    .then((s) => {
-                        if (s == "Configure Language Mode")
-                            updateFileAssociation();
-                    });
-            }
-
-            if (!client && !didClientFail) {
-                await startLangServer(context);
-            }
-        }),
+        vscode.workspace.onDidOpenTextDocument(onOpenDocument),
     );
+
+    for (const doc of vscode.workspace.textDocuments) {
+        await onOpenDocument(doc);
+    }
+}
+
+async function isAegisWorkspace(): Promise<boolean> {
+    const files = await vscode.workspace.findFiles(
+        "**/{*.mcfunction,*.bolt,beet.json,beet.toml,beet.yml,beet.yaml}",
+        "**/{.venv,venv,node_modules,__pycache__,.git}/**",
+        1,
+    );
+    return files.length > 0;
 }
 
 export function deactivate(): Thenable<void> {
