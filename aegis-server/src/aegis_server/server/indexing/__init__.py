@@ -815,6 +815,50 @@ class TypeAnnotationResolver(Reducer):
         return node
 
     @rule(AstRoot)
+    def variable_docstrings(self, node: AstRoot):
+        for i, statement in enumerate(node.commands):
+            if not isinstance(statement, AstStatement):
+                continue
+
+            assignment = statement.arguments[0]
+            if not isinstance(assignment, AstAssignment) or not isinstance(
+                assignment.target, AstTargetIdentifier
+            ):
+                continue
+
+            target = assignment.target
+            nodes = [target]
+            if self.module and (
+                result := search_scope_for_binding(
+                    target.value, target, self.module.lexical_scope
+                )
+            ):
+                for binding in result[1].variables[target.value].bindings:
+                    if _hash_node(binding.origin) == _hash_node(target):
+                        nodes.extend(
+                            reference
+                            for reference in binding.references
+                            if isinstance(reference, AstIdentifier)
+                        )
+
+            documentation = None
+            if i + 1 < len(node.commands) and isinstance(
+                docstring := node.commands[i + 1], AstDocstring
+            ):
+                documentation = cast(str, cast(AstValue, docstring.arguments[0]).value)
+            for reference in nodes:
+                metadata = (
+                    retrieve_metadata(
+                        self.resource_location, reference, VariableMetadata
+                    )
+                    or VariableMetadata()
+                )
+                metadata.documentation = documentation
+                attach_metadata(self.resource_location, reference, metadata)
+
+        return node
+
+    @rule(AstRoot)
     def root(self, node: AstRoot):
         if node.location.pos != 0:
             return node
